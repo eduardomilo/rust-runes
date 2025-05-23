@@ -1,5 +1,5 @@
-use rust_rule_engine::ast;
-use rust_rule_engine::*;
+use rust_runes::ast;
+use rust_runes::*;
 use std::collections::HashMap;
 
 fn main() -> Result<()> {
