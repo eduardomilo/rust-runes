@@ -34,6 +34,12 @@ impl ExecutionResult {
     }
 }
 
+impl Default for ExecutionResult {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct RuleEngine {
     knowledge_base: KnowledgeBase,
 }
@@ -259,7 +265,7 @@ impl RuleEngine {
                 let value = self.evaluate_expression(value_expr, facts)?;
                 if let Some(fact) = facts.get_mut(obj_name) {
                     fact.set_field(field_name.clone(), value)
-                        .map_err(|e| EngineError::EvaluationError(e))?;
+                        .map_err(EngineError::EvaluationError)?;
                 } else {
                     return Err(EngineError::UnknownVariable(obj_name.clone()));
                 }
