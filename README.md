@@ -1,6 +1,6 @@
 # Rust-Runes: A Rule Engine in Rust
 
-[![Rust](https://github.com/yourusername/rust-runes/actions/workflows/rust.yml/badge.svg)](https://github.com/yourusername/rust-runes/actions/workflows/rust.yml)
+[![Rust](https://github.com/eduardomilo/rust-runes/actions/workflows/rust.yml/badge.svg)](https://github.com/eduardomilo/rust-runes/actions/workflows/rust.yml)
 
 A lightweight, efficient rule engine written in Rust, designed for embedding business logic in applications. Inspired by [Grule Rule Engine](https://github.com/hyperjumptech/grule-rule-engine) for Go.
 
