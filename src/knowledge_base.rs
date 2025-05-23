@@ -24,7 +24,9 @@ impl KnowledgeBase {
     }
 
     pub fn get_rule(&self, name: &str) -> Option<&Rule> {
-        self.rule_index.get(name).and_then(|&index| self.rules.get(index))
+        self.rule_index
+            .get(name)
+            .and_then(|&index| self.rules.get(index))
     }
 
     pub fn get_rules(&self) -> &[Rule] {
@@ -41,14 +43,14 @@ impl KnowledgeBase {
         if let Some(&index) = self.rule_index.get(name) {
             let rule = self.rules.remove(index);
             self.rule_index.remove(name);
-            
+
             // Update indices for rules that came after the removed rule
             for (_, rule_index) in self.rule_index.iter_mut() {
                 if *rule_index > index {
                     *rule_index -= 1;
                 }
             }
-            
+
             Some(rule)
         } else {
             None

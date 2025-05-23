@@ -11,7 +11,12 @@ pub struct Rule {
 }
 
 impl Rule {
-    pub fn new(name: String, salience: i32, when_condition: Expression, then_actions: Vec<Expression>) -> Self {
+    pub fn new(
+        name: String,
+        salience: i32,
+        when_condition: Expression,
+        then_actions: Vec<Expression>,
+    ) -> Self {
         Self {
             name,
             description: None,

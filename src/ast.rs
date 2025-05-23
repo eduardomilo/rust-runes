@@ -7,17 +7,17 @@ pub enum Expression {
     String(String),
     Number(f64),
     Boolean(bool),
-    
+
     // Variables and field access
     Variable(String),
     FieldAccess(Box<Expression>, String),
-    
+
     // Binary operations
     Add(Box<Expression>, Box<Expression>),
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
     Divide(Box<Expression>, Box<Expression>),
-    
+
     // Comparison operations
     Equal(Box<Expression>, Box<Expression>),
     NotEqual(Box<Expression>, Box<Expression>),
@@ -25,12 +25,12 @@ pub enum Expression {
     LessEqual(Box<Expression>, Box<Expression>),
     GreaterThan(Box<Expression>, Box<Expression>),
     GreaterEqual(Box<Expression>, Box<Expression>),
-    
+
     // Logical operations
     And(Box<Expression>, Box<Expression>),
     Or(Box<Expression>, Box<Expression>),
     Not(Box<Expression>),
-    
+
     // Assignment
     Assignment(String, Box<Expression>),
     FieldAssignment(String, String, Box<Expression>),

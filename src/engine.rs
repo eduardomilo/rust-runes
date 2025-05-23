@@ -49,7 +49,10 @@ impl RuleEngine {
         self.knowledge_base.add_rule(rule)
     }
 
-    pub fn execute(&self, facts: &mut HashMap<String, Fact>) -> Result<ExecutionResult, EngineError> {
+    pub fn execute(
+        &self,
+        facts: &mut HashMap<String, Fact>,
+    ) -> Result<ExecutionResult, EngineError> {
         let start_time = std::time::Instant::now();
         let mut result = ExecutionResult::new();
 
@@ -71,34 +74,41 @@ impl RuleEngine {
         Ok(result)
     }
 
-    fn evaluate_condition(&self, expr: &Expression, facts: &HashMap<String, Fact>) -> Result<bool, EngineError> {
+    fn evaluate_condition(
+        &self,
+        expr: &Expression,
+        facts: &HashMap<String, Fact>,
+    ) -> Result<bool, EngineError> {
         let value = self.evaluate_expression(expr, facts)?;
         Ok(value.is_truthy())
     }
 
-    fn evaluate_expression(&self, expr: &Expression, facts: &HashMap<String, Fact>) -> std::result::Result<FactValue, EngineError> {
+    fn evaluate_expression(
+        &self,
+        expr: &Expression,
+        facts: &HashMap<String, Fact>,
+    ) -> std::result::Result<FactValue, EngineError> {
         match expr {
             Expression::String(s) => Ok(FactValue::String(s.clone())),
             Expression::Number(n) => Ok(FactValue::Number(*n)),
             Expression::Boolean(b) => Ok(FactValue::Boolean(*b)),
-            
-            Expression::Variable(name) => {
-                facts.get(name)
-                    .map(|fact| fact.value.clone())
-                    .ok_or_else(|| EngineError::UnknownVariable(name.clone()))
-            }
-            
+
+            Expression::Variable(name) => facts
+                .get(name)
+                .map(|fact| fact.value.clone())
+                .ok_or_else(|| EngineError::UnknownVariable(name.clone())),
+
             Expression::FieldAccess(obj_expr, field) => {
                 match self.evaluate_expression(obj_expr, facts)? {
-                    FactValue::Object(obj) => {
-                        obj.get(field)
-                            .cloned()
-                            .ok_or_else(|| EngineError::EvaluationError(format!("Field '{}' not found", field)))
-                    }
-                    _ => Err(EngineError::TypeError("Cannot access field on non-object".to_string()))
+                    FactValue::Object(obj) => obj.get(field).cloned().ok_or_else(|| {
+                        EngineError::EvaluationError(format!("Field '{}' not found", field))
+                    }),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot access field on non-object".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::Add(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
@@ -108,25 +118,29 @@ impl RuleEngine {
                     _ => Err(EngineError::TypeError("Cannot add these types".to_string())),
                 }
             }
-            
+
             Expression::Subtract(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 match (left_val, right_val) {
                     (FactValue::Number(a), FactValue::Number(b)) => Ok(FactValue::Number(a - b)),
-                    _ => Err(EngineError::TypeError("Cannot subtract these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot subtract these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::Multiply(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 match (left_val, right_val) {
                     (FactValue::Number(a), FactValue::Number(b)) => Ok(FactValue::Number(a * b)),
-                    _ => Err(EngineError::TypeError("Cannot multiply these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot multiply these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::Divide(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
@@ -138,87 +152,109 @@ impl RuleEngine {
                             Ok(FactValue::Number(a / b))
                         }
                     }
-                    _ => Err(EngineError::TypeError("Cannot divide these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot divide these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::Equal(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 Ok(FactValue::Boolean(self.values_equal(&left_val, &right_val)))
             }
-            
+
             Expression::NotEqual(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
-                Ok(FactValue::Boolean(!self.values_equal(&left_val, &right_val)))
+                Ok(FactValue::Boolean(
+                    !self.values_equal(&left_val, &right_val),
+                ))
             }
-            
+
             Expression::LessThan(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 match (left_val, right_val) {
                     (FactValue::Number(a), FactValue::Number(b)) => Ok(FactValue::Boolean(a < b)),
-                    _ => Err(EngineError::TypeError("Cannot compare these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot compare these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::LessEqual(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 match (left_val, right_val) {
                     (FactValue::Number(a), FactValue::Number(b)) => Ok(FactValue::Boolean(a <= b)),
-                    _ => Err(EngineError::TypeError("Cannot compare these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot compare these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::GreaterThan(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 match (left_val, right_val) {
                     (FactValue::Number(a), FactValue::Number(b)) => Ok(FactValue::Boolean(a > b)),
-                    _ => Err(EngineError::TypeError("Cannot compare these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot compare these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::GreaterEqual(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
                 match (left_val, right_val) {
                     (FactValue::Number(a), FactValue::Number(b)) => Ok(FactValue::Boolean(a >= b)),
-                    _ => Err(EngineError::TypeError("Cannot compare these types".to_string())),
+                    _ => Err(EngineError::TypeError(
+                        "Cannot compare these types".to_string(),
+                    )),
                 }
             }
-            
+
             Expression::And(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
-                Ok(FactValue::Boolean(left_val.is_truthy() && right_val.is_truthy()))
+                Ok(FactValue::Boolean(
+                    left_val.is_truthy() && right_val.is_truthy(),
+                ))
             }
-            
+
             Expression::Or(left, right) => {
                 let left_val = self.evaluate_expression(left, facts)?;
                 let right_val = self.evaluate_expression(right, facts)?;
-                Ok(FactValue::Boolean(left_val.is_truthy() || right_val.is_truthy()))
+                Ok(FactValue::Boolean(
+                    left_val.is_truthy() || right_val.is_truthy(),
+                ))
             }
-            
+
             Expression::Not(expr) => {
                 let val = self.evaluate_expression(expr, facts)?;
                 Ok(FactValue::Boolean(!val.is_truthy()))
             }
-            
-            _ => Err(EngineError::EvaluationError("Unsupported expression type".to_string())),
+
+            _ => Err(EngineError::EvaluationError(
+                "Unsupported expression type".to_string(),
+            )),
         }
     }
 
-    fn execute_action(&self, action: &Expression, facts: &mut HashMap<String, Fact>) -> std::result::Result<(), EngineError> {
+    fn execute_action(
+        &self,
+        action: &Expression,
+        facts: &mut HashMap<String, Fact>,
+    ) -> std::result::Result<(), EngineError> {
         match action {
             Expression::Assignment(var_name, value_expr) => {
                 let value = self.evaluate_expression(value_expr, facts)?;
                 facts.insert(var_name.clone(), Fact::new(var_name.clone(), value));
                 Ok(())
             }
-            
+
             Expression::FieldAssignment(obj_name, field_name, value_expr) => {
                 let value = self.evaluate_expression(value_expr, facts)?;
                 if let Some(fact) = facts.get_mut(obj_name) {
@@ -229,8 +265,10 @@ impl RuleEngine {
                 }
                 Ok(())
             }
-            
-            _ => Err(EngineError::EvaluationError("Invalid action expression".to_string())),
+
+            _ => Err(EngineError::EvaluationError(
+                "Invalid action expression".to_string(),
+            )),
         }
     }
 
