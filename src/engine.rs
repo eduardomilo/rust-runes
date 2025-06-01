@@ -55,10 +55,7 @@ impl RuleEngine {
         self.knowledge_base.add_rule(rule)
     }
 
-    pub fn execute(
-        &self,
-        facts: &mut HashMap<String, Fact>,
-    ) -> crate::Result<ExecutionResult> {
+    pub fn execute(&self, facts: &mut HashMap<String, Fact>) -> crate::Result<ExecutionResult> {
         let start_time = std::time::Instant::now();
         let mut result = ExecutionResult::new();
 

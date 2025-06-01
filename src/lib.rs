@@ -302,19 +302,19 @@ mod tests {
         // Test that the API now uses consistent Result types
         let mut engine = RuleEngine::new();
         let mut facts = HashMap::new();
-        
+
         let rule = Rule::new(
-            "test_api".to_string(), 
-            10, 
-            Expression::Boolean(true), 
-            vec![]
+            "test_api".to_string(),
+            10,
+            Expression::Boolean(true),
+            vec![],
         );
-        
+
         // This should work with the unified Result type
         engine.add_rule(rule).unwrap(); // Now returns crate::Result<()>
-        
+
         let result = engine.execute(&mut facts).unwrap(); // Now returns crate::Result<ExecutionResult>
-        
+
         assert_eq!(result.rules_fired.len(), 1);
         assert_eq!(result.rules_fired[0], "test_api");
     }
