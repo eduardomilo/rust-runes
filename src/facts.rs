@@ -76,13 +76,13 @@ impl Fact {
         }
     }
 
-    pub fn set_field(&mut self, field_name: String, value: FactValue) -> Result<(), String> {
+    pub fn set_field(&mut self, field_name: String, value: FactValue) -> crate::Result<()> {
         match &mut self.value {
             FactValue::Object(obj) => {
                 obj.insert(field_name, value);
                 Ok(())
             }
-            _ => Err("Cannot set field on non-object fact".to_string()),
+            _ => Err("Cannot set field on non-object fact".into()),
         }
     }
 }
