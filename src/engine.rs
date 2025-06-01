@@ -51,14 +51,14 @@ impl RuleEngine {
         }
     }
 
-    pub fn add_rule(&mut self, rule: Rule) -> Result<(), String> {
+    pub fn add_rule(&mut self, rule: Rule) -> crate::Result<()> {
         self.knowledge_base.add_rule(rule)
     }
 
     pub fn execute(
         &self,
         facts: &mut HashMap<String, Fact>,
-    ) -> Result<ExecutionResult, EngineError> {
+    ) -> crate::Result<ExecutionResult> {
         let start_time = std::time::Instant::now();
         let mut result = ExecutionResult::new();
 
@@ -265,7 +265,7 @@ impl RuleEngine {
                 let value = self.evaluate_expression(value_expr, facts)?;
                 if let Some(fact) = facts.get_mut(obj_name) {
                     fact.set_field(field_name.clone(), value)
-                        .map_err(EngineError::EvaluationError)?;
+                        .map_err(|e| EngineError::EvaluationError(e.to_string()))?;
                 } else {
                     return Err(EngineError::UnknownVariable(obj_name.clone()));
                 }

@@ -12,9 +12,9 @@ impl KnowledgeBase {
         Self::default()
     }
 
-    pub fn add_rule(&mut self, rule: Rule) -> Result<(), String> {
+    pub fn add_rule(&mut self, rule: Rule) -> crate::Result<()> {
         if self.rule_index.contains_key(&rule.name) {
-            return Err(format!("Rule '{}' already exists", rule.name));
+            return Err(format!("Rule '{}' already exists", rule.name).into());
         }
 
         let index = self.rules.len();
