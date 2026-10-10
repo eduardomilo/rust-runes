@@ -6,6 +6,8 @@ use crate::operators;
 use crate::time_functions;
 use chrono::{DateTime, Datelike, FixedOffset, Timelike};
 use regex::Regex;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// Signature of a function callable from rules, including user-registered ones.
 pub type Function = dyn Fn(&[FactValue]) -> Result<FactValue, String> + Send + Sync;
@@ -17,7 +19,7 @@ pub type Method = dyn Fn(&mut FactValue, &[FactValue]) -> Result<FactValue, Stri
 /// rather than on values. They can only be used as `then` statements.
 pub const ENGINE_FUNCTIONS: &[&str] = &["Retract", "Complete"];
 
-type Builtin = fn(&str, &[FactValue]) -> Result<FactValue, String>;
+pub(crate) type Builtin = fn(&str, &[FactValue]) -> Result<FactValue, String>;
 
 pub fn is_reserved(name: &str) -> bool {
     ENGINE_FUNCTIONS.contains(&name) || builtin(name).is_some()
@@ -28,7 +30,7 @@ pub fn call_builtin(name: &str, args: &[FactValue]) -> Option<Result<FactValue, 
     builtin(name).map(|f| f(name, args))
 }
 
-fn builtin(name: &str) -> Option<Builtin> {
+pub(crate) fn builtin(name: &str) -> Option<Builtin> {
     Some(match name {
         // Working-memory hints. This engine has no working memory to reset, so they
         // are accepted for compatibility and do nothing.
@@ -251,9 +253,8 @@ pub fn call_method(
         (FactValue::String(s), "ToUpper") => arity(name, args, 0).map(|_| s.to_uppercase().into()),
         (FactValue::String(s), "Trim") => arity(name, args, 0).map(|_| s.trim().into()),
         (FactValue::String(s), "MatchString") => string(name, args, 0, 1).and_then(|pattern| {
-            let re =
-                Regex::new(pattern).map_err(|e| format!("{}() invalid pattern: {}", name, e))?;
-            Ok(FactValue::Boolean(re.is_match(s)))
+            with_regex(pattern, |re| FactValue::Boolean(re.is_match(s)))
+                .map_err(|e| format!("{}() invalid pattern: {}", name, e))
         }),
 
         (FactValue::Array(a), "Contains") => {
@@ -279,6 +280,28 @@ pub fn call_method_mut(
         }
         (target, name) => call_method(target, name, args),
     }
+}
+
+/// Compiled `MatchString` patterns, so each is compiled once per thread rather than
+/// on every call. Bounded so that rules building patterns dynamically can't grow it
+/// without limit.
+const REGEX_CACHE_LIMIT: usize = 256;
+
+thread_local! {
+    static REGEX_CACHE: RefCell<HashMap<String, Regex>> = RefCell::new(HashMap::new());
+}
+
+fn with_regex<T>(pattern: &str, f: impl FnOnce(&Regex) -> T) -> Result<T, regex::Error> {
+    REGEX_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if !cache.contains_key(pattern) {
+            if cache.len() >= REGEX_CACHE_LIMIT {
+                cache.clear();
+            }
+            cache.insert(pattern.to_string(), Regex::new(pattern)?);
+        }
+        Ok(f(&cache[pattern]))
+    })
 }
 
 fn arity(name: &str, args: &[FactValue], expected: usize) -> Result<(), String> {

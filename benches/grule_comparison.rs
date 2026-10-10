@@ -8,6 +8,9 @@
 //! - `execute/no_match`: same rules, but a fact that matches none of them. This has
 //!   no Grule counterpart; it shows the cost of a full evaluation pass when every
 //!   condition has to be evaluated in full (no `||` short-circuit on the first operand).
+//! - `chain`: N rules over one fact, where rule `i` sets the field rule `i + 1` waits
+//!   for, so an execution runs N cycles. Measured with condition caching on and off;
+//!   with it, each cycle only re-evaluates the rule whose input just changed.
 //!
 //! Run with `cargo bench`.
 
@@ -101,5 +104,56 @@ fn bench_execute(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_load, bench_execute);
+/// `count` rules where rule `i` fires once `Fact.F{i}` is set and then sets `Fact.F{i+1}`.
+fn chain_rules(count: usize) -> String {
+    (0..count)
+        .map(|i| {
+            format!(
+                "rule Step{i} {{ when Fact.F{i} == true && Fact.F{next} == false then Fact.F{next} = true; }}\n",
+                next = i + 1
+            )
+        })
+        .collect()
+}
+
+fn chain_fact(count: usize) -> HashMap<String, Fact> {
+    let fields = (0..=count)
+        .map(|i| (format!("F{}", i), FactValue::Boolean(i == 0)))
+        .collect();
+    HashMap::from([(
+        "Fact".to_string(),
+        Fact::from_object("Fact".to_string(), fields),
+    )])
+}
+
+fn bench_chain(c: &mut Criterion) {
+    let mut group = c.benchmark_group("chain");
+    group.sample_size(10);
+    for count in RULE_COUNTS {
+        let facts = chain_fact(count);
+        group.throughput(Throughput::Elements(count as u64));
+        for caching in [true, false] {
+            let mut engine = load(&chain_rules(count));
+            engine.set_condition_caching(caching);
+            let fired = engine
+                .execute(&mut facts.clone())
+                .unwrap()
+                .rules_fired
+                .len();
+            assert_eq!(fired, count);
+
+            let name = if caching { "cached" } else { "uncached" };
+            group.bench_with_input(BenchmarkId::new(name, count), &facts, |b, facts| {
+                b.iter_batched(
+                    || facts.clone(),
+                    |mut facts| engine.execute(&mut facts).unwrap(),
+                    BatchSize::SmallInput,
+                )
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_load, bench_execute, bench_chain);
 criterion_main!(benches);

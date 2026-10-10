@@ -81,6 +81,18 @@ Execution ends when no condition holds.
   gives the underlying error.
 - `&&` and `||` short-circuit.
 
+Two optimizations avoid re-evaluating everything each cycle, without changing which
+rules fire:
+
+- **Condition caching**, in the role of Grule's working memory: a condition's result
+  is reused until a rule assigns to (or calls a method on) a fact path it reads.
+  `Changed("Fact.Field")` / `Forget("Fact.Field")` mark a path as changed for cases the
+  engine can't see. Conditions that use `Now()`, logging, or your own functions or
+  methods are always re-evaluated. `set_condition_caching(false)` turns caching off.
+- **Stopping at the first match**: once a cycle's highest-salience match is found,
+  lower rules are skipped, unless evaluating them is observable (a listener is
+  attached, evaluation errors are returned, or the condition logs or calls your code).
+
 The engine also provides:
 
 - `execute_with_cancel(&mut facts, &AtomicBool)`: stops with `EngineError::Cancelled`
@@ -130,7 +142,7 @@ All of Grule's built-in functions are available:
 
 | Kind | Functions |
 |---|---|
-| Engine | `Retract(name)`, `Complete()` (statements only); `Changed(name)`, `Forget(name)` (accepted, no effect) |
+| Engine | `Retract(name)`, `Complete()` (statements only); `Changed(path)`, `Forget(path)` (invalidate cached conditions reading `path`) |
 | Logging | `Log(value)`, `LogFormat(format, value)`, through the `log` crate (target `grule`) |
 | Checks | `IsNil(x)`, `IsZero(x)`, `StringContains(s, sub)` |
 | Time | `Now()`, `MakeTime(y, mo, d, h, mi, s)`, `GetTimeYear/Month/Day/Hour/Minute/Second(t)`, `IsTimeBefore(t, u)`, `IsTimeAfter(t, u)`, `TimeFormat(t, layout)` with Go layouts such as `"2006-01-02 15:04:05"` |
@@ -168,8 +180,8 @@ statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
 
 ## Differences from Grule
 
-- There is no RETE working memory caching expression results between cycles; every
-  condition is re-evaluated each cycle. `Changed` and `Forget` are therefore no-ops.
+- Instead of RETE's per-expression working memory, whole condition results are cached
+  and invalidated by the fact paths rules write (see Execution Model).
 - There is no knowledge library with named, versioned knowledge bases; an engine holds
   one set of rules. Rules load from GRL text and files (not Grule's JSON rule format,
   URLs or bundles).
@@ -182,7 +194,8 @@ statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
 `cargo bench` runs criterion benchmarks (`benches/grule_comparison.rs`) that mirror
 Grule's own: loading 100 and 1000 rules, and executing a fact against them, using the same
 rule set as Grule's `examples/benchmark/*.grl`. An extra `execute/no_match` case runs a
-fact that matches no rule.
+fact that matches no rule, and `chain` measures a run of many cycles with condition
+caching on and off.
 
 ## License
 

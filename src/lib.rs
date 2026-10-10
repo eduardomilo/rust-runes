@@ -1,4 +1,5 @@
 pub mod ast;
+mod compiled;
 pub mod engine;
 pub mod facts;
 pub mod functions;

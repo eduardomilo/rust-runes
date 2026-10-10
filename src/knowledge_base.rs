@@ -1,3 +1,4 @@
+use crate::compiled::CompiledRule;
 use crate::parser::GrlParser;
 use crate::rule::Rule;
 use std::collections::HashMap;
@@ -10,6 +11,14 @@ pub struct KnowledgeBase {
     /// Indices into `rules`, highest salience first; ties keep insertion order.
     /// Maintained on insert/remove so execution never has to sort.
     salience_order: Vec<usize>,
+    /// `rules[i]` compiled for execution
+    compiled: Vec<CompiledRule>,
+    /// For each fact name, the rules whose conditions read it
+    readers: HashMap<String, Vec<usize>>,
+    /// How many rules have conditions with effects, or that call methods
+    /// (which may turn out to be user-registered)
+    effectful_conditions: usize,
+    conditions_with_methods: usize,
 }
 
 impl KnowledgeBase {
@@ -28,6 +37,9 @@ impl KnowledgeBase {
             .partition_point(|&i| self.rules[i].salience >= rule.salience);
         self.salience_order.insert(position, index);
         self.rule_index.insert(rule.name.clone(), index);
+        let compiled = CompiledRule::new(&rule);
+        self.add_readers(index, &compiled);
+        self.compiled.push(compiled);
         self.rules.push(rule);
         Ok(())
     }
@@ -91,9 +103,45 @@ impl KnowledgeBase {
         self.salience_order.iter().map(|&i| &self.rules[i])
     }
 
+    /// Iterates rules highest salience first along with their index and compiled form.
+    pub(crate) fn entries_by_salience(
+        &self,
+    ) -> impl Iterator<Item = (usize, &Rule, &CompiledRule)> + '_ {
+        self.salience_order
+            .iter()
+            .map(|&i| (i, &self.rules[i], &self.compiled[i]))
+    }
+
+    pub(crate) fn compiled(&self, index: usize) -> &CompiledRule {
+        &self.compiled[index]
+    }
+
+    /// Indices of the rules whose conditions read the fact `root`.
+    pub(crate) fn readers_of(&self, root: &str) -> &[usize] {
+        self.readers.get(root).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether every rule's condition can be skipped without observable effects,
+    /// given whether any user methods are registered.
+    pub(crate) fn all_conditions_skippable(&self, user_methods_registered: bool) -> bool {
+        self.effectful_conditions == 0
+            && (!user_methods_registered || self.conditions_with_methods == 0)
+    }
+
+    fn add_readers(&mut self, index: usize, compiled: &CompiledRule) {
+        self.effectful_conditions += compiled.has_effects as usize;
+        self.conditions_with_methods += !compiled.condition_methods.is_empty() as usize;
+        let mut roots: Vec<&String> = compiled.reads.iter().map(|path| &path[0]).collect();
+        roots.dedup();
+        for root in roots {
+            self.readers.entry(root.clone()).or_default().push(index);
+        }
+    }
+
     pub fn remove_rule(&mut self, name: &str) -> Option<Rule> {
         if let Some(&index) = self.rule_index.get(name) {
             let rule = self.rules.remove(index);
+            self.compiled.remove(index);
             self.rule_index.remove(name);
 
             // Update indices for rules that came after the removed rule
@@ -108,6 +156,14 @@ impl KnowledgeBase {
                     *i -= 1;
                 }
             }
+            let compiled = std::mem::take(&mut self.compiled);
+            self.readers.clear();
+            self.effectful_conditions = 0;
+            self.conditions_with_methods = 0;
+            for (i, rule) in compiled.iter().enumerate() {
+                self.add_readers(i, rule);
+            }
+            self.compiled = compiled;
 
             Some(rule)
         } else {
@@ -119,6 +175,10 @@ impl KnowledgeBase {
         self.rules.clear();
         self.rule_index.clear();
         self.salience_order.clear();
+        self.compiled.clear();
+        self.readers.clear();
+        self.effectful_conditions = 0;
+        self.conditions_with_methods = 0;
     }
 
     pub fn len(&self) -> usize {

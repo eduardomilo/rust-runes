@@ -36,7 +36,9 @@ The goal is parity with Grule (Go): same GRL language, execution model and built
 When in doubt about semantics, Grule's source is the reference (`antlr/grulev3.g4`,
 `pkg/reflectmath.go`, `ast/BuiltInFunctions.go`, `engine/GruleEngine.go`).
 
-1. **Rule Engine (`engine.rs`)**: Each cycle evaluates every non-retracted rule's condition, then fires the highest-salience match (ties: insertion order), until none match. Handles `Retract`/`Complete`, `max_cycles`, the failed-evaluation policy (failing conditions count as false unless `return_err_on_failed_rule_evaluation`), listeners, cancellation, `fetch_matching_rules`, and assignment/mutating method calls on fact paths. Expression evaluation returns `Cow` so reading `a.b.c` borrows instead of cloning.
+1. **Rule Engine (`engine.rs`)**: Each cycle finds the highest-salience matching rule (ties: insertion order) and fires it, until none match. Condition results are cached per execution and invalidated by the fact paths fired rules write; lower rules are skipped once a match is found unless their evaluation is observable. `tests/optimization_equivalence.rs` checks these optimizations never change outcomes — run it after touching either. Handles `Retract`/`Complete`, `max_cycles`, the failed-evaluation policy (failing conditions count as false unless `return_err_on_failed_rule_evaluation`), listeners, cancellation, `fetch_matching_rules`, and assignment/mutating method calls on fact paths. Expression evaluation returns `Cow` so reading `a.b.c` borrows instead of cloning.
+
+   **Compiled rules (`compiled.rs`)**: Rules are compiled when added: literals become values, built-ins are resolved, and each rule records the fact paths its condition reads and its actions write, plus whether its condition is deterministic / has effects. The engine evaluates these `Node`s, not the public `ast::Expression`.
 
 2. **Operators (`operators.rs`)**: Type rules for every operator, ported from Grule's `reflectmath.go` (integer vs float arithmetic, `/` always float, string concatenation, comparison and equality rules, strict booleans).
 

@@ -1,11 +1,10 @@
-use crate::ast::Expression;
+use crate::compiled::{path_from_snippet, CompiledRule, Node, Path as FactPath};
 use crate::facts::{Fact, FactValue};
 use crate::functions::{self, Function, Method};
 use crate::knowledge_base::KnowledgeBase;
 use crate::operators;
 use crate::rule::Rule;
 use std::borrow::Cow;
-use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Write};
 use std::path::Path;
@@ -118,6 +117,8 @@ impl Default for ExecutionResult {
 struct ExecutionState {
     retracted: HashSet<String>,
     completed: bool,
+    /// Paths named by `Changed` / `Forget` in the current rule's actions
+    changed: Vec<FactPath>,
 }
 
 /// One step of a path into a fact, e.g. `.customer` or `[0]`.
@@ -133,6 +134,7 @@ pub struct RuleEngine {
     max_cycles: usize,
     return_err_on_failed_rule_evaluation: bool,
     listeners: Vec<Box<dyn EngineListener>>,
+    condition_caching: bool,
 }
 
 impl RuleEngine {
@@ -144,6 +146,7 @@ impl RuleEngine {
             max_cycles: DEFAULT_MAX_CYCLES,
             return_err_on_failed_rule_evaluation: false,
             listeners: Vec::new(),
+            condition_caching: true,
         }
     }
 
@@ -177,6 +180,12 @@ impl RuleEngine {
     /// stops with the error instead.
     pub fn set_return_err_on_failed_rule_evaluation(&mut self, enabled: bool) {
         self.return_err_on_failed_rule_evaluation = enabled;
+    }
+
+    /// Reusing condition results between cycles is on by default and never changes
+    /// which rules fire; turning it off is only useful for comparison and debugging.
+    pub fn set_condition_caching(&mut self, enabled: bool) {
+        self.condition_caching = enabled;
     }
 
     pub fn add_listener(&mut self, listener: impl EngineListener + 'static) {
@@ -219,6 +228,15 @@ impl RuleEngine {
     /// (ties go to the rule added first). Rules removed with `Retract` stay out for the
     /// rest of this execution, and `Complete()` ends it once the current rule's actions
     /// have run.
+    ///
+    /// Two optimizations keep this from re-evaluating everything every cycle, without
+    /// changing which rules fire:
+    /// - A condition's result is reused until a rule's actions (or `Changed`/`Forget`)
+    ///   touch a fact path it reads. Conditions using `Now()`, logging or user
+    ///   functions/methods are always re-evaluated.
+    /// - Once the cycle's highest-salience match is found, lower rules are skipped
+    ///   unless evaluating them has observable effects: a listener is attached,
+    ///   evaluation errors are returned, or the condition logs or calls user code.
     pub fn execute(
         &self,
         facts: &mut HashMap<String, Fact>,
@@ -238,27 +256,55 @@ impl RuleEngine {
         let mut state = ExecutionState::default();
         let mut cycle: u64 = 0;
 
+        // Cached condition results, by rule index
+        let mut cache: Vec<Option<bool>> = vec![None; self.knowledge_base.len()];
+        let may_skip = self.listeners.is_empty() && !self.return_err_on_failed_rule_evaluation;
+        // When no condition has effects, nothing after the first match needs evaluating
+        let stop_at_first_match = may_skip
+            && self
+                .knowledge_base
+                .all_conditions_skippable(!self.methods.is_empty());
+
         loop {
             check_cancel(cancel)?;
             self.listeners.iter().for_each(|l| l.begin_cycle(cycle + 1));
 
             let mut selected = None;
-            for rule in self.knowledge_base.rules_by_salience() {
+            for (index, rule, compiled) in self.knowledge_base.entries_by_salience() {
                 check_cancel(cancel)?;
                 if state.retracted.contains(&rule.name) {
                     continue;
                 }
-                let matched = self.test_rule(rule, facts)?;
+                if selected.is_some() {
+                    if stop_at_first_match {
+                        break;
+                    }
+                    if may_skip && self.is_skippable(compiled) {
+                        continue;
+                    }
+                }
+                let matched = match cache[index] {
+                    Some(matched) => matched,
+                    None => {
+                        let matched = self.test_rule(rule, compiled, facts)?;
+                        if self.is_cacheable(compiled) {
+                            cache[index] = Some(matched);
+                        }
+                        matched
+                    }
+                };
                 self.listeners
                     .iter()
                     .for_each(|l| l.evaluate_rule(cycle + 1, rule, matched));
                 // Rules come in salience order, so the first match has the highest salience
                 if matched && selected.is_none() {
-                    selected = Some(rule);
+                    selected = Some((rule, compiled));
                 }
             }
 
-            let Some(rule) = selected else { break };
+            let Some((rule, compiled)) = selected else {
+                break;
+            };
             cycle += 1;
             if cycle > self.max_cycles as u64 {
                 return Err(EngineError::MaxCyclesExceeded(self.max_cycles));
@@ -267,7 +313,7 @@ impl RuleEngine {
             self.listeners
                 .iter()
                 .for_each(|l| l.execute_rule(cycle, rule));
-            for action in &rule.then_actions {
+            for action in &compiled.then {
                 self.execute_action(action, facts, &mut state)
                     .map_err(|e| e.in_rule(rule, RulePhase::Then))?;
             }
@@ -275,10 +321,44 @@ impl RuleEngine {
             if state.completed {
                 break;
             }
+
+            for written in compiled.writes.iter().chain(&state.changed) {
+                self.invalidate(&mut cache, written);
+            }
+            state.changed.clear();
         }
 
         result.execution_time_ms = start_time.elapsed().as_millis();
         Ok(result)
+    }
+
+    /// Whether a rule's condition result can be reused until its inputs change.
+    fn is_cacheable(&self, compiled: &CompiledRule) -> bool {
+        self.condition_caching && compiled.deterministic && !self.calls_user_methods(compiled)
+    }
+
+    /// Whether a rule's condition can go unevaluated without anyone noticing.
+    fn is_skippable(&self, compiled: &CompiledRule) -> bool {
+        !compiled.has_effects && !self.calls_user_methods(compiled)
+    }
+
+    fn calls_user_methods(&self, compiled: &CompiledRule) -> bool {
+        !self.methods.is_empty()
+            && compiled
+                .condition_methods
+                .iter()
+                .any(|name| self.methods.contains_key(name))
+    }
+
+    /// Forgets cached results of conditions that read anything under `written`.
+    fn invalidate(&self, cache: &mut [Option<bool>], written: &[String]) {
+        let Some(root) = written.first() else { return };
+        for &index in self.knowledge_base.readers_of(root) {
+            if cache[index].is_some() && self.knowledge_base.compiled(index).reads_overlap(written)
+            {
+                cache[index] = None;
+            }
+        }
     }
 
     /// Returns the rules whose conditions currently hold, highest salience first,
@@ -288,8 +368,8 @@ impl RuleEngine {
         facts: &HashMap<String, Fact>,
     ) -> Result<Vec<&Rule>, EngineError> {
         let mut matching = Vec::new();
-        for rule in self.knowledge_base.rules_by_salience() {
-            if self.test_rule(rule, facts)? {
+        for (_, rule, compiled) in self.knowledge_base.entries_by_salience() {
+            if self.test_rule(rule, compiled, facts)? {
                 matching.push(rule);
             }
         }
@@ -297,8 +377,13 @@ impl RuleEngine {
     }
 
     /// Evaluates a rule's condition, applying the failed-evaluation policy.
-    fn test_rule(&self, rule: &Rule, facts: &HashMap<String, Fact>) -> Result<bool, EngineError> {
-        match self.evaluate_condition(&rule.when_condition, facts, "rule condition") {
+    fn test_rule(
+        &self,
+        rule: &Rule,
+        compiled: &CompiledRule,
+        facts: &HashMap<String, Fact>,
+    ) -> Result<bool, EngineError> {
+        match self.evaluate_condition(&compiled.when, facts, "rule condition") {
             Ok(matched) => Ok(matched),
             Err(e) if self.return_err_on_failed_rule_evaluation => {
                 Err(e.in_rule(rule, RulePhase::When))
@@ -312,75 +397,51 @@ impl RuleEngine {
 
     fn evaluate_condition(
         &self,
-        expr: &Expression,
+        node: &Node,
         facts: &HashMap<String, Fact>,
         operation: &str,
     ) -> Result<bool, EngineError> {
-        operators::boolean(&*self.eval(expr, facts)?, operation)
+        operators::boolean(&*self.eval(node, facts)?, operation)
     }
 
     fn evaluate_expression(
         &self,
-        expr: &Expression,
+        node: &Node,
         facts: &HashMap<String, Fact>,
     ) -> std::result::Result<FactValue, EngineError> {
-        self.eval(expr, facts).map(Cow::into_owned)
+        self.eval(node, facts).map(Cow::into_owned)
     }
 
-    /// Evaluates `expr`, borrowing from `facts` where possible so that reading
-    /// `order.customer.age` doesn't copy `order`.
+    /// Evaluates `node`, borrowing from `facts` (and from the rule's constants) where
+    /// possible so that reading `order.customer.age` doesn't copy `order`.
     fn eval<'f>(
         &self,
-        expr: &Expression,
+        node: &'f Node,
         facts: &'f HashMap<String, Fact>,
     ) -> Result<Cow<'f, FactValue>, EngineError> {
         let owned = |value| Ok(Cow::Owned(value));
-        let binary = |left: &Expression,
-                      right: &Expression,
-                      op: fn(&FactValue, &FactValue) -> Result<FactValue, EngineError>|
-         -> Result<Cow<'f, FactValue>, EngineError> {
-            Ok(Cow::Owned(op(
-                &*self.eval(left, facts)?,
-                &*self.eval(right, facts)?,
-            )?))
-        };
-        let compare = |left: &Expression,
-                       right: &Expression,
-                       test: fn(Ordering) -> bool|
-         -> Result<Cow<'f, FactValue>, EngineError> {
-            let ordering =
-                operators::compare(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?;
-            Ok(Cow::Owned(FactValue::Boolean(ordering.is_some_and(test))))
-        };
+        match node {
+            Node::Const(value) => Ok(Cow::Borrowed(value)),
 
-        match expr {
-            Expression::String(s) => owned(FactValue::String(s.clone())),
-            Expression::Integer(n) => owned(FactValue::Integer(*n)),
-            Expression::Float(n) => owned(FactValue::Float(*n)),
-            Expression::Boolean(b) => owned(FactValue::Boolean(*b)),
-            Expression::Nil => owned(FactValue::Null),
-
-            Expression::Variable(name) => facts
+            Node::Variable(name) => facts
                 .get(name)
                 .map(|fact| Cow::Borrowed(&fact.value))
                 .ok_or_else(|| EngineError::UnknownVariable(name.clone())),
 
-            Expression::FieldAccess(obj_expr, field) => {
-                project(self.eval(obj_expr, facts)?, |obj| match obj {
-                    FactValue::Object(obj) => obj.get(field).ok_or_else(|| {
-                        EngineError::EvaluationError(format!("Field '{}' not found", field))
-                    }),
-                    other => Err(EngineError::TypeError(format!(
-                        "Cannot access field '{}' on {}",
-                        field,
-                        other.type_name()
-                    ))),
-                })
-            }
+            Node::Field(base, field) => project(self.eval(base, facts)?, |obj| match obj {
+                FactValue::Object(obj) => obj.get(field).ok_or_else(|| {
+                    EngineError::EvaluationError(format!("Field '{}' not found", field))
+                }),
+                other => Err(EngineError::TypeError(format!(
+                    "Cannot access field '{}' on {}",
+                    field,
+                    other.type_name()
+                ))),
+            }),
 
-            Expression::Index(container_expr, index_expr) => {
-                let index = self.eval(index_expr, facts)?;
-                project(self.eval(container_expr, facts)?, |container| {
+            Node::Index(base, index_node) => {
+                let index = self.eval(index_node, facts)?;
+                project(self.eval(base, facts)?, |container| {
                     match (container, &*index) {
                         (FactValue::Array(items), FactValue::Integer(n)) => {
                             Ok(&items[array_index(*n, items.len())?])
@@ -399,17 +460,21 @@ impl RuleEngine {
                 })
             }
 
-            Expression::Call(name, args) => {
-                if functions::ENGINE_FUNCTIONS.contains(&name.as_str()) {
-                    return Err(EngineError::EvaluationError(format!(
-                        "{}() can only be used as a statement in a rule's then block",
-                        name
-                    )));
-                }
+            Node::Builtin {
+                name,
+                function,
+                args,
+            } => function(name, &self.evaluate_args(args, facts)?)
+                .map(Cow::Owned)
+                .map_err(EngineError::FunctionError),
+
+            Node::EngineCall(name, _) => Err(EngineError::EvaluationError(format!(
+                "{}() can only be used as a statement in a rule's then block",
+                name
+            ))),
+
+            Node::UserCall(name, args) => {
                 let args = self.evaluate_args(args, facts)?;
-                if let Some(result) = functions::call_builtin(name, &args) {
-                    return result.map(Cow::Owned).map_err(EngineError::FunctionError);
-                }
                 let function = self
                     .functions
                     .get(name)
@@ -419,8 +484,8 @@ impl RuleEngine {
                     .map_err(|e| EngineError::FunctionError(format!("{}(): {}", name, e)))
             }
 
-            Expression::MethodCall(target_expr, name, args) => {
-                let target = self.eval(target_expr, facts)?;
+            Node::Method(target_node, name, args) => {
+                let target = self.eval(target_node, facts)?;
                 let args = self.evaluate_args(args, facts)?;
                 if let Some(result) = functions::call_method(&target, name, &args) {
                     return result.map(Cow::Owned).map_err(EngineError::FunctionError);
@@ -431,41 +496,38 @@ impl RuleEngine {
                     .map(Cow::Owned)
             }
 
-            Expression::Add(left, right) => binary(left, right, operators::add),
-            Expression::Subtract(left, right) => binary(left, right, operators::subtract),
-            Expression::Multiply(left, right) => binary(left, right, operators::multiply),
-            Expression::Divide(left, right) => binary(left, right, operators::divide),
-            Expression::Modulo(left, right) => binary(left, right, operators::modulo),
-            Expression::BitAnd(left, right) => binary(left, right, operators::bit_and),
-            Expression::BitOr(left, right) => binary(left, right, operators::bit_or),
-
-            Expression::Equal(left, right) => owned(FactValue::Boolean(operators::equal(
-                &*self.eval(left, facts)?,
-                &*self.eval(right, facts)?,
-            )?)),
-            Expression::NotEqual(left, right) => owned(FactValue::Boolean(!operators::equal(
-                &*self.eval(left, facts)?,
-                &*self.eval(right, facts)?,
-            )?)),
-            Expression::LessThan(left, right) => compare(left, right, Ordering::is_lt),
-            Expression::LessEqual(left, right) => compare(left, right, Ordering::is_le),
-            Expression::GreaterThan(left, right) => compare(left, right, Ordering::is_gt),
-            Expression::GreaterEqual(left, right) => compare(left, right, Ordering::is_ge),
+            Node::Binary(op, left, right) => {
+                owned(op(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?)
+            }
+            Node::Compare(test, left, right) => {
+                let ordering =
+                    operators::compare(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?;
+                owned(FactValue::Boolean(ordering.is_some_and(test)))
+            }
+            Node::Equal {
+                negate,
+                left,
+                right,
+            } => {
+                let equal =
+                    operators::equal(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?;
+                owned(FactValue::Boolean(equal != *negate))
+            }
 
             // && and || short-circuit, so the right side is only evaluated when needed
-            Expression::And(left, right) => owned(FactValue::Boolean(
+            Node::And(left, right) => owned(FactValue::Boolean(
                 self.evaluate_condition(left, facts, "logical AND")?
                     && self.evaluate_condition(right, facts, "logical AND")?,
             )),
-            Expression::Or(left, right) => owned(FactValue::Boolean(
+            Node::Or(left, right) => owned(FactValue::Boolean(
                 self.evaluate_condition(left, facts, "logical OR")?
                     || self.evaluate_condition(right, facts, "logical OR")?,
             )),
-            Expression::Not(expr) => owned(FactValue::Boolean(
-                !self.evaluate_condition(expr, facts, "negation")?,
+            Node::Not(inner) => owned(FactValue::Boolean(
+                !self.evaluate_condition(inner, facts, "negation")?,
             )),
 
-            Expression::Assign(..) => Err(EngineError::EvaluationError(
+            Node::Assign(..) => Err(EngineError::EvaluationError(
                 "Assignment cannot be used as a value".to_string(),
             )),
         }
@@ -473,7 +535,7 @@ impl RuleEngine {
 
     fn evaluate_args(
         &self,
-        args: &[Expression],
+        args: &[Node],
         facts: &HashMap<String, Fact>,
     ) -> Result<Vec<FactValue>, EngineError> {
         args.iter()
@@ -504,17 +566,17 @@ impl RuleEngine {
 
     fn execute_action(
         &self,
-        action: &Expression,
+        action: &Node,
         facts: &mut HashMap<String, Fact>,
         state: &mut ExecutionState,
     ) -> std::result::Result<(), EngineError> {
         match action {
-            Expression::Assign(target, value_expr) => {
-                let value = self.evaluate_expression(value_expr, facts)?;
+            Node::Assign(target, value_node) => {
+                let value = self.evaluate_expression(value_node, facts)?;
                 self.assign(target, value, facts)
             }
 
-            Expression::Call(name, args) if name == "Retract" => {
+            Node::EngineCall(name, args) if name == "Retract" => {
                 let [arg] = args.as_slice() else {
                     return Err(EngineError::FunctionError(format!(
                         "Retract() takes 1 argument(s), got {}",
@@ -537,7 +599,8 @@ impl RuleEngine {
                 Ok(())
             }
 
-            Expression::Call(name, args) if name == "Complete" => {
+            Node::EngineCall(_, args) => {
+                // Complete()
                 if !args.is_empty() {
                     return Err(EngineError::FunctionError(format!(
                         "Complete() takes 0 argument(s), got {}",
@@ -548,9 +611,19 @@ impl RuleEngine {
                 Ok(())
             }
 
+            // Changed("Fact.X") / Forget("Fact.X"): something changed that the engine
+            // couldn't see, so conditions reading it must be re-evaluated
+            Node::Builtin { name, args, .. } if name == "Changed" || name == "Forget" => {
+                self.evaluate_expression(action, facts)?;
+                if let FactValue::String(snippet) = self.evaluate_expression(&args[0], facts)? {
+                    state.changed.push(path_from_snippet(&snippet));
+                }
+                Ok(())
+            }
+
             // A method called on a fact path operates on the stored value, so
             // `Order.Items.Append(x);` changes the fact
-            Expression::MethodCall(target, name, args) if target.is_assignable() => {
+            Node::Method(target, name, args) if target.is_assignable() => {
                 let args = self.evaluate_args(args, facts)?;
                 if let Some(result) =
                     functions::call_method(&*self.eval(target, facts)?, name, &args)
@@ -563,7 +636,7 @@ impl RuleEngine {
             }
 
             // Called for their effect; the result is discarded
-            Expression::Call(..) | Expression::MethodCall(..) => {
+            Node::Builtin { .. } | Node::UserCall(..) | Node::Method(..) => {
                 self.evaluate_expression(action, facts)?;
                 Ok(())
             }
@@ -577,7 +650,7 @@ impl RuleEngine {
     /// Assigns `value` to a variable, or to a field/element reached through it.
     fn assign(
         &self,
-        target: &Expression,
+        target: &Node,
         value: FactValue,
         facts: &mut HashMap<String, Fact>,
     ) -> Result<(), EngineError> {
@@ -605,7 +678,7 @@ impl RuleEngine {
     /// Finds the stored value a path like `order.items[0]` refers to.
     fn resolve_mut<'f>(
         &self,
-        target: &Expression,
+        target: &Node,
         facts: &'f mut HashMap<String, Fact>,
     ) -> Result<&'f mut FactValue, EngineError> {
         let (root, keys) = self.target_path(target, facts)?;
@@ -617,17 +690,17 @@ impl RuleEngine {
     /// borrowed mutably.
     fn target_path(
         &self,
-        target: &Expression,
+        target: &Node,
         facts: &HashMap<String, Fact>,
     ) -> Result<(String, Vec<Key>), EngineError> {
         match target {
-            Expression::Variable(name) => Ok((name.clone(), Vec::new())),
-            Expression::FieldAccess(inner, field) => {
+            Node::Variable(name) => Ok((name.clone(), Vec::new())),
+            Node::Field(inner, field) => {
                 let (root, mut keys) = self.target_path(inner, facts)?;
                 keys.push(Key::Field(field.clone()));
                 Ok((root, keys))
             }
-            Expression::Index(inner, index) => {
+            Node::Index(inner, index) => {
                 let (root, mut keys) = self.target_path(inner, facts)?;
                 keys.push(match self.evaluate_expression(index, facts)? {
                     FactValue::Integer(n) => Key::Index(n),
