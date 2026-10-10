@@ -155,7 +155,7 @@ impl KnowledgeBase {
             self.rule_index.remove(name);
 
             // Update indices for rules that came after the removed rule
-            for (_, rule_index) in self.rule_index.iter_mut() {
+            for rule_index in self.rule_index.values_mut() {
                 if *rule_index > index {
                     *rule_index -= 1;
                 }

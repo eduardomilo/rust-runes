@@ -82,7 +82,7 @@ impl GrlParser {
                     description = Some(parse_string(part.into_inner().next().unwrap())?)
                 }
                 GrammarRule::salience => {
-                    let value = part.into_inner().last().unwrap();
+                    let value = part.into_inner().next_back().unwrap();
                     salience = parse_integer(value.as_str())
                         .and_then(|n| i32::try_from(n).map_err(|e| e.to_string()))
                         .map_err(|e| format!("Invalid salience {}: {}", value.as_str(), e))?;
