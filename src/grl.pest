@@ -1,4 +1,4 @@
-// Grammar for GRL (Grule Rule Language)
+// Grammar for GRL (Grule Rule Language), following Grule's grulev3.g4
 
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT    = _{ ("//" ~ (!"\n" ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
@@ -8,7 +8,8 @@ grl         = { SOI ~ rule_def* ~ EOI }
 
 rule_def    = { kw_rule ~ ident ~ description? ~ salience? ~ "{" ~ kw_when ~ expr ~ kw_then ~ action* ~ "}" }
 description = { string }
-salience    = { kw_salience ~ int }
+salience    = { kw_salience ~ signed_int }
+signed_int  = @{ "-"? ~ integer }
 
 // Actions: an assignment or a function call. Whether the left-hand side is assignable
 // (and the statement a call) is checked in parser.rs.
@@ -18,7 +19,7 @@ assign_op = { "+=" | "-=" | "*=" | "/=" | "=" }
 // Expressions: operator precedence is resolved by the Pratt parser in parser.rs
 expr    = { operand ~ (infix ~ operand)* }
 operand = _{ prefix* ~ primary ~ postfix* }
-primary = _{ number | string | boolean | nil | call | ident | "(" ~ expr ~ ")" }
+primary = _{ float | integer | string | boolean | nil | call | ident | "(" ~ expr ~ ")" }
 
 call = { ident ~ args }
 args = { "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
@@ -28,35 +29,51 @@ method  = { "." ~ ident ~ args }
 field   = { "." ~ ident }
 index   = { "[" ~ expr ~ "]" }
 
-infix = _{ or | and | eq | ne | le | ge | lt | gt | add | sub | mul | div }
-or    = { "||" }
-and   = { "&&" }
-eq    = { "==" }
-ne    = { "!=" }
-le    = { "<=" }
-ge    = { ">=" }
-lt    = { "<" }
-gt    = { ">" }
-add   = { "+" }
-sub   = { "-" }
-mul   = { "*" }
-div   = { "/" }
+// `&&` and `||` must be tried before `&` and `|`
+infix  = _{ or | and | eq | ne | le | ge | lt | gt | add | sub | mul | div | modulo | bitand | bitor }
+or     = { "||" }
+and    = { "&&" }
+eq     = { "==" }
+ne     = { "!=" }
+le     = { "<=" }
+ge     = { ">=" }
+lt     = { "<" }
+gt     = { ">" }
+add    = { "+" }
+sub    = { "-" }
+mul    = { "*" }
+div    = { "/" }
+modulo = { "%" }
+bitand = { "&" }
+bitor  = { "|" }
 
 prefix = _{ not | neg }
 not    = { "!" }
 neg    = { "-" }
 
-// Literals
-number  = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
-int     = @{ "-"? ~ ASCII_DIGIT+ }
-boolean = @{ (^"true" | ^"false") ~ !ident_char }
-nil     = @{ ^"nil" ~ !ident_char }
-string  = ${ "\"" ~ string_inner ~ "\"" }
-string_inner = @{ (("\\" ~ ANY) | (!("\"" | "\\") ~ ANY))* }
+// Number literals
+float     = @{ hex_float | dec_float }
+dec_float = @{
+    (ASCII_DIGIT+ ~ "." ~ ASCII_DIGIT+ ~ exponent?)
+  | (ASCII_DIGIT+ ~ exponent)
+  | ("." ~ ASCII_DIGIT+ ~ exponent?)
+}
+exponent  = @{ ^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+hex_float = @{ "0" ~ ^"x" ~ ((ASCII_HEX_DIGIT+ ~ ("." ~ ASCII_HEX_DIGIT*)?) | ("." ~ ASCII_HEX_DIGIT+)) ~ ^"p" ~ ("+" | "-")? ~ ASCII_DIGIT+ }
+integer   = @{ ("0" ~ ^"x" ~ ASCII_HEX_DIGIT+) | ("0" ~ ASCII_OCT_DIGIT+) | "0" | (ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) }
 
-// Identifiers
-ident      = @{ !keyword ~ (ASCII_ALPHA | "_") ~ ident_char* }
-ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+// Other literals
+boolean   = @{ (^"true" | ^"false") ~ !ident_char }
+nil       = @{ ^"nil" ~ !ident_char }
+string    = ${ dq_string | sq_string }
+dq_string = ${ "\"" ~ dq_inner ~ "\"" }
+dq_inner  = @{ (("\\" ~ ANY) | "\"\"" | (!("\"" | "\\") ~ ANY))* }
+sq_string = ${ "'" ~ sq_inner ~ "'" }
+sq_inner  = @{ (("\\" ~ ANY) | "''" | (!("'" | "\\") ~ ANY))* }
+
+// Identifiers (Unicode letters allowed, as in Grule)
+ident      = @{ !keyword ~ (XID_START | "_") ~ ident_char* }
+ident_char = _{ XID_CONTINUE }
 
 // Keywords are case-insensitive, as in Grule
 keyword     = @{ (^"rule" | ^"when" | ^"then" | ^"salience" | ^"true" | ^"false" | ^"nil") ~ !ident_char }

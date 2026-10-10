@@ -5,10 +5,9 @@
 //!   (Grule: `Benchmark_Grule_Load_Rules`)
 //! - `execute/first_match`: run one fact against the rules; the highest-salience rule
 //!   matches and calls `Complete()` (Grule: `Benchmark_Grule_Execution_Engine`)
-//! - `execute/no_match`: same rules, but a fact that matches none of them, so every
-//!   condition is evaluated. This has no Grule counterpart; it exists because Grule
-//!   evaluates every rule each cycle anyway, while this engine stops at the first match,
-//!   which makes `first_match` cheap here regardless of rule count.
+//! - `execute/no_match`: same rules, but a fact that matches none of them. This has
+//!   no Grule counterpart; it shows the cost of a full evaluation pass when every
+//!   condition has to be evaluated in full (no `||` short-circuit on the first operand).
 //!
 //! Run with `cargo bench`.
 
@@ -45,14 +44,14 @@ fn load(grl: &str) -> RuleEngine {
 }
 
 /// Grule's `RideFact`, with Go's zero values for the fields the benchmark leaves unset.
-fn ride_fact(distance: f64, duration: f64) -> HashMap<String, Fact> {
+fn ride_fact(distance: i64, duration: i64) -> HashMap<String, Fact> {
     let fields = HashMap::from([
-        ("Distance".to_string(), FactValue::Number(distance)),
-        ("Duration".to_string(), FactValue::Number(duration)),
+        ("Distance".to_string(), FactValue::Integer(distance)),
+        ("Duration".to_string(), FactValue::Integer(duration)),
         ("RideType".to_string(), FactValue::String(String::new())),
         ("IsFrequentCustomer".to_string(), FactValue::Boolean(false)),
         ("Result".to_string(), FactValue::Boolean(false)),
-        ("NetAmount".to_string(), FactValue::Number(0.0)),
+        ("NetAmount".to_string(), FactValue::Integer(0)),
     ]);
     HashMap::from([(
         "Fact".to_string(),
@@ -75,8 +74,8 @@ fn bench_load(c: &mut Criterion) {
 fn bench_execute(c: &mut Criterion) {
     let mut group = c.benchmark_group("execute");
     let scenarios = [
-        ("first_match", ride_fact(6000.0, 121.0), 1),
-        ("no_match", ride_fact(0.0, 0.0), 0),
+        ("first_match", ride_fact(6000, 121), 1),
+        ("no_match", ride_fact(0, 0), 0),
     ];
     for count in RULE_COUNTS {
         let engine = load(&grule_rules(count));

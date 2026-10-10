@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum Expression {
     // Literals
     String(String),
-    Number(f64),
+    Integer(i64),
+    Float(f64),
     Boolean(bool),
     Nil,
 
@@ -23,6 +24,9 @@ pub enum Expression {
     Subtract(Box<Expression>, Box<Expression>),
     Multiply(Box<Expression>, Box<Expression>),
     Divide(Box<Expression>, Box<Expression>),
+    Modulo(Box<Expression>, Box<Expression>),
+    BitAnd(Box<Expression>, Box<Expression>),
+    BitOr(Box<Expression>, Box<Expression>),
 
     // Comparison operations
     Equal(Box<Expression>, Box<Expression>),

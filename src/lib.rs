@@ -3,10 +3,12 @@ pub mod engine;
 pub mod facts;
 pub mod functions;
 pub mod knowledge_base;
+pub mod operators;
 pub mod parser;
 pub mod rule;
+pub mod time_functions;
 
-pub use engine::{ExecutionResult, RuleEngine};
+pub use engine::{EngineError, EngineListener, ExecutionResult, RuleEngine, RulePhase};
 pub use facts::{Fact, FactValue};
 pub use knowledge_base::KnowledgeBase;
 pub use rule::Rule;
@@ -31,10 +33,10 @@ mod tests {
             0,
             Expression::GreaterThan(
                 Box::new(Expression::Variable("x".to_string())),
-                Box::new(Expression::Number(5.0)),
+                Box::new(Expression::Integer(5)),
             ),
             vec![
-                Expression::assign(&["y"], Expression::Number(10.0)),
+                Expression::assign(&["y"], Expression::Integer(10)),
                 Expression::call("Retract", vec![Expression::String("test_rule".to_string())]),
             ],
         );
@@ -46,7 +48,7 @@ mod tests {
 
         assert_eq!(result.rules_fired.len(), 1);
         assert_eq!(result.rules_fired[0], "test_rule");
-        assert_eq!(facts.get("y").unwrap().value, FactValue::Number(10.0));
+        assert_eq!(facts.get("y").unwrap().value, FactValue::Integer(10));
     }
 
     #[test]
@@ -58,7 +60,7 @@ mod tests {
                     "field1".to_string(),
                     FactValue::String("value1".to_string()),
                 ),
-                ("field2".to_string(), FactValue::Number(42.0)),
+                ("field2".to_string(), FactValue::Integer(42)),
             ]),
         );
 
@@ -66,7 +68,7 @@ mod tests {
             fact.get_field("field1"),
             Some(&FactValue::String("value1".to_string()))
         );
-        assert_eq!(fact.get_field("field2"), Some(&FactValue::Number(42.0)));
+        assert_eq!(fact.get_field("field2"), Some(&FactValue::Integer(42)));
 
         fact.set_field("field3".to_string(), FactValue::Boolean(true))
             .unwrap();
@@ -112,9 +114,9 @@ mod tests {
         // Test the condition (x == 10)
         match &rule.when_condition {
             Expression::Equal(left, right) => match (&**left, &**right) {
-                (Expression::Variable(var), Expression::Number(val)) => {
+                (Expression::Variable(var), Expression::Integer(val)) => {
                     assert_eq!(var, "x");
-                    assert_eq!(*val, 10.0);
+                    assert_eq!(*val, 10);
                 }
                 _ => panic!("Unexpected expression structure in condition"),
             },
@@ -124,7 +126,7 @@ mod tests {
         // Test the action (y = 20)
         assert_eq!(
             rule.then_actions,
-            vec![Expression::assign(&["y"], Expression::Number(20.0))]
+            vec![Expression::assign(&["y"], Expression::Integer(20))]
         );
     }
 
@@ -140,7 +142,7 @@ mod tests {
                     Box::new(Expression::Variable("customer".to_string())),
                     "age".to_string(),
                 )),
-                Box::new(Expression::Number(18.0)),
+                Box::new(Expression::Integer(18)),
             ),
             vec![
                 Expression::assign(&["customer", "eligible"], Expression::Boolean(true)),
@@ -199,11 +201,11 @@ mod tests {
         // Test the condition (customer.age >= 18)
         match &rule_age.when_condition {
             Expression::GreaterEqual(left_field, left_val) => match (&**left_field, &**left_val) {
-                (Expression::FieldAccess(obj, field), Expression::Number(val)) => match &**obj {
+                (Expression::FieldAccess(obj, field), Expression::Integer(val)) => match &**obj {
                     Expression::Variable(obj_name) => {
                         assert_eq!(obj_name, "customer");
                         assert_eq!(field, "age");
-                        assert_eq!(*val, 18.0);
+                        assert_eq!(*val, 18);
                     }
                     _ => panic!("Expected Variable expression for object"),
                 },
@@ -249,7 +251,7 @@ mod tests {
                 &["y"],
                 Expression::Add(
                     Box::new(Expression::Variable("x".to_string())),
-                    Box::new(Expression::Number(10.0)),
+                    Box::new(Expression::Integer(10)),
                 ),
             )]
         );

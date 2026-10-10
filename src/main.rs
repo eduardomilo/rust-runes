@@ -67,12 +67,12 @@ fn main() -> Result<()> {
 
     let mut test_car_fields = HashMap::new();
     test_car_fields.insert("SpeedUp".to_string(), FactValue::Boolean(true));
-    test_car_fields.insert("Speed".to_string(), FactValue::Number(50.0));
-    test_car_fields.insert("MaxSpeed".to_string(), FactValue::Number(100.0));
-    test_car_fields.insert("SpeedIncrement".to_string(), FactValue::Number(10.0));
+    test_car_fields.insert("Speed".to_string(), FactValue::Integer(50));
+    test_car_fields.insert("MaxSpeed".to_string(), FactValue::Integer(100));
+    test_car_fields.insert("SpeedIncrement".to_string(), FactValue::Integer(10));
 
     let mut distance_record_fields = HashMap::new();
-    distance_record_fields.insert("TotalDistance".to_string(), FactValue::Number(0.0));
+    distance_record_fields.insert("TotalDistance".to_string(), FactValue::Integer(0));
 
     facts.insert(
         "TestCar".to_string(),

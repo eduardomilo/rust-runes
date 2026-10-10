@@ -1,5 +1,7 @@
+use crate::parser::GrlParser;
 use crate::rule::Rule;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Default)]
 pub struct KnowledgeBase {
@@ -28,6 +30,45 @@ impl KnowledgeBase {
         self.rule_index.insert(rule.name.clone(), index);
         self.rules.push(rule);
         Ok(())
+    }
+
+    /// Parses GRL text and adds all of its rules. Returns how many were added.
+    /// Nothing is added if any rule fails to parse or clashes with an existing name.
+    pub fn add_rules_from_str(&mut self, grl: &str) -> Result<usize, String> {
+        let rules = GrlParser::new().parse_rules(grl)?;
+        let mut names = std::collections::HashSet::new();
+        for rule in &rules {
+            if self.rule_index.contains_key(&rule.name) || !names.insert(&rule.name) {
+                return Err(format!("Rule '{}' already exists", rule.name));
+            }
+        }
+        let count = rules.len();
+        for rule in rules {
+            self.add_rule(rule)?;
+        }
+        Ok(count)
+    }
+
+    /// Loads all rules from a `.grl` file. Returns how many were added.
+    pub fn add_rules_from_file(&mut self, path: impl AsRef<Path>) -> Result<usize, String> {
+        let path = path.as_ref();
+        let grl =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        self.add_rules_from_str(&grl)
+            .map_err(|e| format!("{}: {}", path.display(), e))
+    }
+
+    /// Loads all `.grl` files under `dir`, recursively, in path order.
+    /// Returns how many rules were added.
+    pub fn add_rules_from_dir(&mut self, dir: impl AsRef<Path>) -> Result<usize, String> {
+        let mut files = Vec::new();
+        collect_grl_files(dir.as_ref(), &mut files)?;
+        files.sort();
+        let mut count = 0;
+        for file in files {
+            count += self.add_rules_from_file(&file)?;
+        }
+        Ok(count)
     }
 
     pub fn get_rule(&self, name: &str) -> Option<&Rule> {
@@ -87,6 +128,24 @@ impl KnowledgeBase {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+}
+
+fn collect_grl_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {}", dir.display(), e))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("{}: {}", dir.display(), e))?
+            .path();
+        if path.is_dir() {
+            collect_grl_files(&path, files)?;
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("grl"))
+        {
+            files.push(path);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

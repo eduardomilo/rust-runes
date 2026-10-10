@@ -20,17 +20,24 @@ pub struct GrlParser {
 
 impl GrlParser {
     pub fn new() -> Self {
-        // Lowest precedence first
+        // Lowest precedence first, matching Grule: all comparisons share one level,
+        // and `&` / `|` bind like `+` / `-`
         let pratt = PrattParser::new()
             .op(Op::infix(GrammarRule::or, Assoc::Left))
             .op(Op::infix(GrammarRule::and, Assoc::Left))
-            .op(Op::infix(GrammarRule::eq, Assoc::Left) | Op::infix(GrammarRule::ne, Assoc::Left))
-            .op(Op::infix(GrammarRule::lt, Assoc::Left)
+            .op(Op::infix(GrammarRule::eq, Assoc::Left)
+                | Op::infix(GrammarRule::ne, Assoc::Left)
+                | Op::infix(GrammarRule::lt, Assoc::Left)
                 | Op::infix(GrammarRule::le, Assoc::Left)
                 | Op::infix(GrammarRule::gt, Assoc::Left)
                 | Op::infix(GrammarRule::ge, Assoc::Left))
-            .op(Op::infix(GrammarRule::add, Assoc::Left) | Op::infix(GrammarRule::sub, Assoc::Left))
-            .op(Op::infix(GrammarRule::mul, Assoc::Left) | Op::infix(GrammarRule::div, Assoc::Left))
+            .op(Op::infix(GrammarRule::add, Assoc::Left)
+                | Op::infix(GrammarRule::sub, Assoc::Left)
+                | Op::infix(GrammarRule::bitand, Assoc::Left)
+                | Op::infix(GrammarRule::bitor, Assoc::Left))
+            .op(Op::infix(GrammarRule::mul, Assoc::Left)
+                | Op::infix(GrammarRule::div, Assoc::Left)
+                | Op::infix(GrammarRule::modulo, Assoc::Left))
             .op(Op::prefix(GrammarRule::not) | Op::prefix(GrammarRule::neg))
             .op(Op::postfix(GrammarRule::method)
                 | Op::postfix(GrammarRule::field)
@@ -75,11 +82,10 @@ impl GrlParser {
                     description = Some(parse_string(part.into_inner().next().unwrap())?)
                 }
                 GrammarRule::salience => {
-                    let int = part.into_inner().last().unwrap();
-                    salience = int
-                        .as_str()
-                        .parse()
-                        .map_err(|_| format!("Invalid salience: {}", int.as_str()))?;
+                    let value = part.into_inner().last().unwrap();
+                    salience = parse_integer(value.as_str())
+                        .and_then(|n| i32::try_from(n).map_err(|e| e.to_string()))
+                        .map_err(|e| format!("Invalid salience {}: {}", value.as_str(), e))?;
                 }
                 GrammarRule::expr => when_condition = Some(self.parse_expr(part.into_inner())?),
                 GrammarRule::action => then_actions.push(self.parse_action(part)?),
@@ -144,11 +150,12 @@ impl GrlParser {
     fn parse_expr(&self, pairs: Pairs<GrammarRule>) -> std::result::Result<Expression, String> {
         self.pratt
             .map_primary(|primary| match primary.as_rule() {
-                GrammarRule::number => primary
-                    .as_str()
-                    .parse()
-                    .map(Expression::Number)
-                    .map_err(|_| format!("Invalid number: {}", primary.as_str())),
+                GrammarRule::integer => parse_integer(primary.as_str())
+                    .map(Expression::Integer)
+                    .map_err(|e| format!("Invalid integer {}: {}", primary.as_str(), e)),
+                GrammarRule::float => parse_float(primary.as_str())
+                    .map(Expression::Float)
+                    .map_err(|e| format!("Invalid number {}: {}", primary.as_str(), e)),
                 GrammarRule::string => parse_string(primary).map(Expression::String),
                 GrammarRule::boolean => Ok(Expression::Boolean(
                     primary.as_str().eq_ignore_ascii_case("true"),
@@ -171,9 +178,10 @@ impl GrlParser {
                 Ok(match op.as_rule() {
                     GrammarRule::not => Expression::Not(Box::new(operand)),
                     GrammarRule::neg => match operand {
-                        Expression::Number(n) => Expression::Number(-n),
+                        Expression::Integer(n) => Expression::Integer(n.wrapping_neg()),
+                        Expression::Float(n) => Expression::Float(-n),
                         other => {
-                            Expression::Subtract(Box::new(Expression::Number(0.0)), Box::new(other))
+                            Expression::Subtract(Box::new(Expression::Integer(0)), Box::new(other))
                         }
                     },
                     rule => unreachable!("unexpected prefix {:?}", rule),
@@ -194,6 +202,9 @@ impl GrlParser {
                     GrammarRule::sub => Expression::Subtract(lhs, rhs),
                     GrammarRule::mul => Expression::Multiply(lhs, rhs),
                     GrammarRule::div => Expression::Divide(lhs, rhs),
+                    GrammarRule::modulo => Expression::Modulo(lhs, rhs),
+                    GrammarRule::bitand => Expression::BitAnd(lhs, rhs),
+                    GrammarRule::bitor => Expression::BitOr(lhs, rhs),
                     rule => unreachable!("unexpected infix {:?}", rule),
                 })
             })
@@ -220,10 +231,29 @@ impl GrlParser {
 }
 
 fn parse_string(pair: Pair<GrammarRule>) -> std::result::Result<String, String> {
-    let raw = pair.into_inner().next().unwrap().as_str();
+    // string -> dq_string | sq_string -> dq_inner | sq_inner
+    let inner = pair
+        .into_inner()
+        .next()
+        .unwrap()
+        .into_inner()
+        .next()
+        .unwrap();
+    let quote = if inner.as_rule() == GrammarRule::dq_inner {
+        '"'
+    } else {
+        '\''
+    };
+    let raw = inner.as_str();
     let mut out = String::with_capacity(raw.len());
-    let mut chars = raw.chars();
+    let mut chars = raw.chars().peekable();
     while let Some(c) = chars.next() {
+        if c == quote {
+            // A doubled quote stands for one quote character
+            chars.next();
+            out.push(quote);
+            continue;
+        }
         if c != '\\' {
             out.push(c);
             continue;
@@ -233,12 +263,53 @@ fn parse_string(pair: Pair<GrammarRule>) -> std::result::Result<String, String> 
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
             Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
             Some('\\') => out.push('\\'),
             Some(other) => return Err(format!("Invalid escape sequence: \\{}", other)),
             None => return Err("Unterminated escape sequence".to_string()),
         }
     }
     Ok(out)
+}
+
+/// Parses a decimal, hexadecimal (`0x1F`) or octal (`017`) integer literal,
+/// optionally preceded by `-`.
+fn parse_integer(text: &str) -> std::result::Result<i64, String> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let magnitude = if let Some(hex) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        i64::from_str_radix(hex, 16)
+    } else if digits.len() > 1 && digits.starts_with('0') {
+        i64::from_str_radix(&digits[1..], 8)
+    } else {
+        digits.parse()
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(if negative { -magnitude } else { magnitude })
+}
+
+/// Parses a decimal float (`1.5`, `2e10`, `.5`) or hexadecimal float (`0x1.8p3`) literal.
+fn parse_float(text: &str) -> std::result::Result<f64, String> {
+    let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) else {
+        return text
+            .parse()
+            .map_err(|e: std::num::ParseFloatError| e.to_string());
+    };
+    let (mantissa, exponent) = hex.split_once(['p', 'P']).ok_or("missing exponent")?;
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let mut value = 0.0;
+    for digit in whole.chars().chain(fraction.chars()) {
+        value = value * 16.0 + digit.to_digit(16).ok_or("invalid hex digit")? as f64;
+    }
+    let exponent: i32 = exponent
+        .parse()
+        .map_err(|e: std::num::ParseIntError| e.to_string())?;
+    Ok(value * 2f64.powi(exponent - 4 * fraction.len() as i32))
 }
 
 impl Default for GrlParser {
@@ -258,8 +329,8 @@ mod tests {
         Box::new(Expression::Variable(name.to_string()))
     }
 
-    fn num(n: f64) -> Box<Expression> {
-        Box::new(Expression::Number(n))
+    fn num(n: i64) -> Box<Expression> {
+        Box::new(Expression::Integer(n))
     }
 
     fn when_of(condition: &str) -> Expression {
@@ -277,7 +348,7 @@ mod tests {
                     var("a"),
                     Box::new(Expression::Multiply(var("b"), var("c")))
                 )),
-                num(0.0),
+                num(0),
             )
         );
     }
@@ -304,7 +375,7 @@ mod tests {
                     Box::new(Expression::Add(var("a"), var("b"))),
                     var("c")
                 )),
-                num(1.0),
+                num(1),
             )
         );
     }
@@ -319,7 +390,7 @@ mod tests {
                     Box::new(Expression::Subtract(var("a"), var("b"))),
                     var("c")
                 )),
-                num(0.0),
+                num(0),
             )
         );
     }
@@ -330,12 +401,12 @@ mod tests {
             when_of("!done && x > -5"),
             Expression::And(
                 Box::new(Expression::Not(var("done"))),
-                Box::new(Expression::GreaterThan(var("x"), num(-5.0))),
+                Box::new(Expression::GreaterThan(var("x"), num(-5))),
             )
         );
         assert_eq!(
             when_of("-x < 0"),
-            Expression::LessThan(Box::new(Expression::Subtract(num(0.0), var("x"))), num(0.0))
+            Expression::LessThan(Box::new(Expression::Subtract(num(0), var("x"))), num(0))
         );
     }
 
@@ -351,7 +422,7 @@ mod tests {
                     )),
                     "age".to_string(),
                 )),
-                num(18.0),
+                num(18),
             )
         );
     }
@@ -385,12 +456,12 @@ mod tests {
         assert_eq!(
             rule.then_actions,
             vec![
-                Expression::assign(&["x"], Expression::Add(var("x"), num(1.0))),
+                Expression::assign(&["x"], Expression::Add(var("x"), num(1))),
                 Expression::assign(
                     &["car", "Speed"],
                     Expression::Multiply(
                         Box::new(Expression::FieldAccess(var("car"), "Speed".to_string())),
-                        num(2.0),
+                        num(2),
                     ),
                 ),
             ]
@@ -460,11 +531,8 @@ mod tests {
         assert_eq!(
             rule.then_actions,
             vec![
-                Expression::assign(&["a", "b", "c"], Expression::Number(1.0)),
-                Expression::assign(
-                    &["a", "b", "c"],
-                    Expression::Add(Box::new(current), num(2.0))
-                ),
+                Expression::assign(&["a", "b", "c"], Expression::Integer(1)),
+                Expression::assign(&["a", "b", "c"], Expression::Add(Box::new(current), num(2))),
             ]
         );
     }
@@ -492,8 +560,8 @@ mod tests {
             Fact::from_object(
                 "customer".to_string(),
                 HashMap::from([
-                    ("age".to_string(), FactValue::Number(30.0)),
-                    ("balance".to_string(), FactValue::Number(500.0)),
+                    ("age".to_string(), FactValue::Integer(30)),
+                    ("balance".to_string(), FactValue::Integer(500)),
                     ("vip".to_string(), FactValue::Boolean(true)),
                 ]),
             ),

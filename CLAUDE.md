@@ -32,58 +32,38 @@ cargo fmt
 
 ## Architecture
 
-The project implements a rule engine with the following components:
+The goal is parity with Grule (Go): same GRL language, execution model and built-ins.
+When in doubt about semantics, Grule's source is the reference (`antlr/grulev3.g4`,
+`pkg/reflectmath.go`, `ast/BuiltInFunctions.go`, `engine/GruleEngine.go`).
 
-1. **Rule Engine (`engine.rs`)**: The core component that evaluates rules against facts and executes actions. Like Grule, it forward-chains: each cycle fires the highest-salience rule whose condition holds, until none do (`Retract` removes a rule; `max_cycles` guards against loops).
+1. **Rule Engine (`engine.rs`)**: Each cycle evaluates every non-retracted rule's condition, then fires the highest-salience match (ties: insertion order), until none match. Handles `Retract`/`Complete`, `max_cycles`, the failed-evaluation policy (failing conditions count as false unless `return_err_on_failed_rule_evaluation`), listeners, cancellation, `fetch_matching_rules`, and assignment/mutating method calls on fact paths. Expression evaluation returns `Cow` so reading `a.b.c` borrows instead of cloning.
 
-   **Functions (`functions.rs`)**: Built-in functions (`Max`, `Now`, ...) and methods (`s.ToUpper()`, `a.Len()`, ...). Users can add functions with `RuleEngine::register_function`. `Retract` is handled by the engine itself.
+2. **Operators (`operators.rs`)**: Type rules for every operator, ported from Grule's `reflectmath.go` (integer vs float arithmetic, `/` always float, string concatenation, comparison and equality rules, strict booleans).
 
-2. **Knowledge Base (`knowledge_base.rs`)**: Stores and manages rules. Provides lookup by name and sorting by salience.
+3. **Functions (`functions.rs`, `time_functions.rs`)**: All Grule built-in functions and string/array/map methods, user functions (`register_function`) and user methods (`register_method`). `time_functions.rs` implements `MakeTime` (Go-style normalization) and Go reference-time layouts for `TimeFormat`.
 
-3. **Rules (`rule.rs`)**: Represents individual rules with conditions and actions. Each rule has:
-   - Name: Unique identifier
-   - Description: Optional explanation
-   - Salience: Priority value (higher executes first)
-   - When condition: Evaluated against facts to determine if rule should fire
-   - Then actions: Operations performed when the condition is true
+4. **Knowledge Base (`knowledge_base.rs`)**: Stores rules, keeps them in salience order on insert, and loads them from GRL strings, files and directories.
 
-4. **Facts (`facts.rs`)**: Represents data the rules operate on. Facts can be:
-   - Simple values (strings, numbers, booleans)
-   - Structured objects with fields
-   - Arrays
+5. **Rules (`rule.rs`)**: Name, optional description, salience, `when` condition and `then` actions.
 
-5. **AST (`ast.rs`)**: Abstract Syntax Tree for representing expressions like:
-   - Literals (string, number, boolean)
-   - Variables and field access
-   - Arithmetic operations
-   - Comparison operations
-   - Logical operations
-   - Assignments
+6. **Facts (`facts.rs`)**: `FactValue` is string, integer, float, boolean, time, object, array or nil. Integers and floats compare equal by value. `Fact::from_serialize` / `deserialize` convert to and from Rust types via serde.
 
-6. **Parser (`parser.rs`, `grl.pest`)**: Parses rule definitions from GRL (Grule Rule Language) text into executable Rule objects, using a pest grammar and a Pratt parser for operator precedence.
+7. **AST (`ast.rs`)**: Expressions, including calls, method calls, indexing and assignments (whose targets are `Variable`/`FieldAccess`/`Index` chains).
+
+8. **Parser (`parser.rs`, `grl.pest`)**: A pest grammar following `grulev3.g4`, with a Pratt parser for Grule's operator precedence.
+
+Tests: `tests/grule_parity.rs` covers Grule-documented behavior; `tests/engine_features.rs` covers engine features end to end. Benchmarks in `benches/grule_comparison.rs` mirror Grule's.
 
 ## Usage Example
 
 ```rust
-// Create a rule engine
 let mut engine = RuleEngine::new();
+engine.add_rules_from_file("rules/pricing.grl")?;
 
-// Add rules (either programmatically or parsed from GRL)
-let rule = Rule::new(
-    "example_rule".to_string(),
-    10,  // salience
-    condition_expression,
-    vec![action_expression],
-);
-engine.add_rule(rule)?;
-
-// Define facts
 let mut facts = HashMap::new();
-facts.insert("fact_name".to_string(), Fact::number_fact("fact_name".to_string(), 42.0));
+facts.insert("Ride".to_string(), Fact::from_serialize("Ride", &ride)?);
 
-// Execute rules
 let result = engine.execute(&mut facts)?;
-
-// Inspect results
+let ride: Ride = facts["Ride"].deserialize()?;
 println!("Rules fired: {:?}", result.rules_fired);
 ```

@@ -5,16 +5,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 fn value(json: Value) -> FactValue {
-    match json {
-        Value::Null => FactValue::Null,
-        Value::Bool(b) => FactValue::Boolean(b),
-        Value::Number(n) => FactValue::Number(n.as_f64().unwrap()),
-        Value::String(s) => FactValue::String(s),
-        Value::Array(items) => FactValue::Array(items.into_iter().map(value).collect()),
-        Value::Object(obj) => {
-            FactValue::Object(obj.into_iter().map(|(k, v)| (k, value(v))).collect())
-        }
-    }
+    FactValue::from_serialize(&json).unwrap()
 }
 
 /// Builds facts from a JSON object: each top-level key becomes a fact.
@@ -27,8 +18,11 @@ fn facts(json: Value) -> HashMap<String, Fact> {
         .collect()
 }
 
+/// An engine that reports condition errors, so tests can assert on them.
+/// (By default, as in Grule, a failing condition just counts as false.)
 fn engine(grl: &str) -> RuleEngine {
     let mut engine = RuleEngine::new();
+    engine.set_return_err_on_failed_rule_evaluation(true);
     for rule in GrlParser::new().parse_rules(grl).unwrap() {
         engine.add_rule(rule).unwrap();
     }
@@ -67,7 +61,7 @@ fn rules_reevaluate_after_each_firing() {
     let result = run(grl, &mut facts).unwrap();
 
     assert_eq!(result.rules_fired, ["Step1", "Step2", "Step3"]);
-    assert_eq!(get(&facts, "x"), &FactValue::Number(3.0));
+    assert_eq!(get(&facts, "x"), &FactValue::Integer(3));
     assert_eq!(get(&facts, "done"), &FactValue::Boolean(true));
 }
 
@@ -96,7 +90,7 @@ fn loop_runs_until_condition_is_false() {
     let result = run(grl, &mut facts).unwrap();
 
     assert_eq!(result.rules_fired.len(), 5);
-    assert_eq!(get(&facts, "distance"), &FactValue::Number(400.0));
+    assert_eq!(get(&facts, "distance"), &FactValue::Integer(400));
 }
 
 #[test]
@@ -106,8 +100,12 @@ fn rule_that_never_settles_hits_max_cycles() {
     let mut facts = facts(json!({ "n": 0 }));
 
     let err = engine.execute(&mut facts).unwrap_err();
-    assert!(matches!(err, EngineError::MaxCyclesExceeded(10)), "{}", err);
-    assert_eq!(get(&facts, "n"), &FactValue::Number(10.0));
+    assert!(
+        matches!(err.root(), EngineError::MaxCyclesExceeded(10)),
+        "{}",
+        err
+    );
+    assert_eq!(get(&facts, "n"), &FactValue::Integer(10));
 }
 
 #[test]
@@ -119,7 +117,7 @@ fn retract_can_remove_another_rule() {
     let mut facts = facts(json!({ "n": 0 }));
     let result = run(grl, &mut facts).unwrap();
     assert_eq!(result.rules_fired, ["Stopper"]);
-    assert_eq!(get(&facts, "n"), &FactValue::Number(0.0));
+    assert_eq!(get(&facts, "n"), &FactValue::Integer(0));
 }
 
 #[test]
@@ -127,7 +125,7 @@ fn retract_errors() {
     let mut f = facts(json!({}));
     let err = run(r#"rule R { when true then Retract("Nope"); }"#, &mut f).unwrap_err();
     assert!(
-        matches!(err, EngineError::UnknownRule(ref name) if name == "Nope"),
+        matches!(err.root(), EngineError::UnknownRule(ref name) if name == "Nope"),
         "{}",
         err
     );
@@ -162,7 +160,7 @@ fn builtin_functions() {
     assert!(check("Floor(x) == -4 && Ceil(x) == -3", f()));
     assert!(check("Max(1, 5, 3) == 5 && Min(4, 2, 8) == 2", f()));
     assert!(check("Pow(2, 10) == 1024 && Sqrt(81) == 9", f()));
-    assert!(check("Now() > 1700000000", f()));
+    assert!(check("Now() > MakeTime(2020, 1, 1, 0, 0, 0)", f()));
     assert!(check("IsNil(empty) && !IsNil(x)", f()));
 }
 
@@ -209,15 +207,21 @@ fn user_registered_functions() {
     );
     engine
         .register_function("Tier", |args| match args {
-            [FactValue::Number(n)] if *n >= 1000.0 => Ok(FactValue::String("gold".to_string())),
-            [FactValue::Number(_)] => Ok(FactValue::String("standard".to_string())),
-            _ => Err("expected a number".to_string()),
+            [n] => match n.as_number() {
+                Some(n) if n >= 1000.0 => Ok(FactValue::from("gold")),
+                Some(_) => Ok(FactValue::from("standard")),
+                None => Err("expected a number".to_string()),
+            },
+            _ => Err("expected one argument".to_string()),
         })
         .unwrap();
     engine
         .register_function("Percent", |args| match args {
-            [FactValue::Number(n), FactValue::Number(p)] => Ok(FactValue::Number(n * p / 100.0)),
-            _ => Err("expected two numbers".to_string()),
+            [n, p] => match (n.as_number(), p.as_number()) {
+                (Some(n), Some(p)) => Ok(FactValue::Float(n * p / 100.0)),
+                _ => Err("expected two numbers".to_string()),
+            },
+            _ => Err("expected two arguments".to_string()),
         })
         .unwrap();
 
@@ -225,7 +229,7 @@ fn user_registered_functions() {
     engine.execute(&mut f).unwrap();
     assert_eq!(
         f["customer"].get_field("discount"),
-        Some(&FactValue::Number(250.0))
+        Some(&FactValue::Integer(250))
     );
 
     assert!(engine
@@ -240,12 +244,12 @@ fn user_registered_functions() {
 fn function_errors() {
     let mut f = facts(json!({ "n": 1 }));
     let err = run("rule R { when Missing(n) then }", &mut f).unwrap_err();
-    assert!(matches!(err, EngineError::UnknownFunction(ref name) if name == "Missing"));
+    assert!(matches!(err.root(), EngineError::UnknownFunction(ref name) if name == "Missing"));
 
     let err = run("rule R { when n.ToUpper() then }", &mut f).unwrap_err();
     assert!(
         err.to_string()
-            .contains("Unknown method 'ToUpper' on number"),
+            .contains("Unknown method 'ToUpper' on integer"),
         "{}",
         err
     );
@@ -326,7 +330,7 @@ fn indexing_errors() {
         ("rule R { when items[-1] == 1 then }", "Invalid array index"),
         (
             "rule R { when items[0.5] == 1 then }",
-            "Invalid array index",
+            "Cannot index array with float",
         ),
         (
             r#"rule R { when items["a"] == 1 then }"#,
@@ -334,12 +338,12 @@ fn indexing_errors() {
         ),
         (
             "rule R { when n[0] == 1 then }",
-            "Cannot index number with number",
+            "Cannot index integer with integer",
         ),
         ("rule R { when true then items[5] = 1; }", "out of bounds"),
         (
             "rule R { when true then n[0] = 1; }",
-            "Cannot index number 'n' with [0]",
+            "Cannot index integer \'n\' with [0]",
         ),
     ];
     for (grl, expected) in cases {
@@ -402,7 +406,7 @@ fn complete_stops_execution_after_current_rule() {
     let result = run(grl, &mut f).unwrap();
     // The rest of First's actions still run; Second never fires
     assert_eq!(result.rules_fired, ["First"]);
-    assert_eq!(get(&f, "n"), &FactValue::Number(11.0));
+    assert_eq!(get(&f, "n"), &FactValue::Integer(11));
 
     let err = run("rule R { when Complete() then }", &mut f).unwrap_err();
     assert!(err.to_string().contains("statement"), "{}", err);

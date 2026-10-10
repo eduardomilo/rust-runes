@@ -2,20 +2,11 @@
 
 [![Rust](https://github.com/eduardomilo/rust-runes/actions/workflows/rust.yml/badge.svg)](https://github.com/eduardomilo/rust-runes/actions/workflows/rust.yml)
 
-A lightweight, efficient rule engine written in Rust, designed for embedding business logic in applications. Inspired by [Grule Rule Engine](https://github.com/hyperjumptech/grule-rule-engine) for Go.
-
-## Features
-
-- Define rules with conditions and actions
-- Execute rules against a set of facts
-- Rule prioritization via salience
-- Programmatic rule creation API
-- Text-based rule definition using GRL (Grule Rule Language)
-- Comprehensive rule engine with facts, expressions, and operations
+A rule engine for embedding business logic in Rust applications, compatible with
+[Grule](https://github.com/hyperjumptech/grule-rule-engine)'s rule language (GRL) and
+execution model. Grule's own `.grl` files load unchanged.
 
 ## Installation
-
-Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
@@ -24,180 +15,174 @@ rust-runes = "0.1.0"
 
 ## Quick Start
 
+Rules live in `.grl` files:
+
+```
+// rules/pricing.grl
+rule LongRide "Long rides get a flat rate" salience 10 {
+    when
+        Ride.Distance > 5000 && !Ride.Priced
+    then
+        Ride.NetAmount = 143.32;
+        Ride.Priced = true;
+        Log("Priced ride of " + Ride.Distance + "m");
+}
+```
+
+Facts can be any serializable type:
+
 ```rust
-use rust_runes::*;
-use rust_runes::ast;
+use rust_runes::{Fact, RuleEngine};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-fn main() -> Result<()> {
-    // Create a rule engine
+#[derive(Serialize, Deserialize)]
+#[allow(non_snake_case)]
+struct Ride {
+    Distance: i64,
+    NetAmount: f64,
+    Priced: bool,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut engine = RuleEngine::new();
-    
-    // Create a simple rule (if x > 5 then y = 10)
-    let rule = Rule::new(
-        "example_rule".to_string(),
-        0,  // salience
-        ast::Expression::GreaterThan(
-            Box::new(ast::Expression::Variable("x".to_string())),
-            Box::new(ast::Expression::Number(5.0)),
-        ),
-        vec![
-            ast::Expression::assign(&["y"], ast::Expression::Number(10.0)),
-            // Without this the rule would keep firing, since x > 5 stays true
-            ast::Expression::call("Retract", vec![ast::Expression::String("example_rule".to_string())]),
-        ],
-    );
-    
-    engine.add_rule(rule)?;
-    
-    // Create facts
-    let mut facts = HashMap::new();
-    facts.insert("x".to_string(), Fact::number_fact("x".to_string(), 7.0));
-    
-    // Execute rules
+    engine.add_rules_from_dir("rules")?;
+
+    let ride = Ride { Distance: 6000, NetAmount: 0.0, Priced: false };
+    let mut facts = HashMap::from([("Ride".to_string(), Fact::from_serialize("Ride", &ride)?)]);
+
     let result = engine.execute(&mut facts)?;
-    
-    // Show results
-    println!("Rules fired: {:?}", result.rules_fired);
-    println!("y = {:?}", facts.get("y").unwrap().value);
-    
+    let ride: Ride = facts["Ride"].deserialize()?;
+    println!("fired {:?}, net amount {}", result.rules_fired, ride.NetAmount);
     Ok(())
 }
 ```
 
-## Using GRL (Grule Rule Language)
-
-You can also define rules using a text-based syntax:
-
-```rust
-use rust_runes::*;
-use std::collections::HashMap;
-
-fn main() -> Result<()> {
-    // Create a rule engine
-    let mut engine = RuleEngine::new();
-    
-    // Define rule in GRL syntax
-    let grl_text = r#"
-        rule CheckEligibility "Check if customer is eligible" salience 10 {
-            when
-                customer.age >= 18 && customer.balance > 1000
-            then
-                customer.eligible = true;
-                message = "Customer is eligible for premium service";
-                Retract("CheckEligibility");
-        }
-    "#;
-
-    // Parse the rule
-    let parser = parser::GrlParser::new();
-    let rule = parser.parse_rule(grl_text)?;
-    
-    // Add rule to engine
-    engine.add_rule(rule)?;
-    
-    // Create and execute with facts...
-    
-    Ok(())
-}
-```
-
-To load a file containing several rules, use `parser.parse_rules(grl_text)`, which returns a `Vec<Rule>`.
-
-The GRL grammar (`src/grl.pest`) supports:
-- Standard operator precedence (`*` `/` over `+` `-` over comparisons over `&&` over `||`) and parentheses
-- Unary `!` and `-`
-- Nested field access and assignment (`order.customer.age += 1;`)
-- Indexing into arrays and objects (`order.lines[0].price`, `tags["vip"] = true;`)
-- Function and method calls (`Max(a, b)`, `name.Trim().ToLower()`), also usable as statements
-- The `nil` literal
-- Compound assignment in actions (`+=`, `-=`, `*=`, `/=`)
-- String escapes (`\"`, `\\`, `\n`, `\t`, `\r`)
-- `//` and `/* */` comments
-- Negative salience
-
-Syntax errors report the line and column where parsing failed.
+Rules can also be loaded with `add_rules_from_file(path)` or `add_rules_from_str(grl)`, or
+built in code with `Rule::new` and the `ast::Expression` constructors. Loading reports the
+file, line and column of syntax errors, and adds nothing from a file that fails.
 
 ## Execution Model
 
-Like Grule, the engine runs rules until nothing more applies. Each cycle it fires the
-highest-salience rule whose condition is true (ties go to the rule added first), then
-re-evaluates every condition against the updated facts. Execution ends when no
-condition holds.
+As in Grule, the engine runs rules until nothing more applies. Each cycle it evaluates
+every rule's condition, then fires the highest-salience rule among those that matched
+(ties go to the rule added first), and starts the next cycle with the updated facts.
+Execution ends when no condition holds.
 
-A rule whose actions never make its own condition false would fire forever. End it
-with `Retract("RuleName")`, which removes a rule for the rest of the execution, or
-add a guard to the condition. As a safety net, execution fails with
-`EngineError::MaxCyclesExceeded` after 5000 firings (`engine.set_max_cycles(n)`
-changes the limit).
+- `Retract("RuleName")` removes a rule for the rest of the execution.
+- `Complete()` ends the execution once the current rule's actions have run.
+- A rule whose actions never make its own condition false would fire forever, so
+  execution fails with `EngineError::MaxCyclesExceeded` after 5000 firings
+  (`set_max_cycles(n)` changes the limit).
+- A condition that fails to evaluate (a missing field, a type error, a non-boolean
+  result) is logged and counts as false. `set_return_err_on_failed_rule_evaluation(true)`
+  makes it an error instead.
+- Errors name the rule and scope they came from (`EngineError::InRule`); `err.root()`
+  gives the underlying error.
+- `&&` and `||` short-circuit.
 
-`&&` and `||` short-circuit, so `x != 0 && 10 / x > 1` is safe when `x` is 0.
+The engine also provides:
+
+- `execute_with_cancel(&mut facts, &AtomicBool)`: stops with `EngineError::Cancelled`
+  once the flag is set.
+- `fetch_matching_rules(&facts)`: the rules whose conditions hold, highest salience
+  first, without running anything.
+- `add_listener(listener)`: an `EngineListener` is notified as each cycle begins, as each
+  rule is evaluated, and before each rule fires.
+
+## The Rule Language
+
+```
+rule Name "optional description" salience 10 {
+    when <condition>
+    then <statement>; <statement>; ...
+}
+```
+
+Keywords are case-insensitive, and identifiers may use Unicode letters.
+
+**Values.** Strings (`"..."` or `'...'`, with `\` escapes and doubled quotes), integers
+(`42`, `0x2A`, `052`), floats (`1.5`, `.5`, `1e3`, `0x1p-2`), booleans, `nil`, and times
+(from `Now()`, `MakeTime(...)` or facts). Facts may also hold objects and arrays.
+
+**Operators**, from lowest to highest precedence:
+
+| Operators | Notes |
+|---|---|
+| `\|\|` | |
+| `&&` | |
+| `==` `!=` `<` `<=` `>` `>=` | Numbers, strings and times can be ordered. A string or boolean is never equal to another type; comparing a number with a non-number is an error. |
+| `+` `-` `&` `\|` | `+` joins strings, and also a string with a number, boolean or time. `&` and `\|` take integers. |
+| `*` `/` `%` | `/` always produces a float (`7 / 2 == 3.5`). `%` takes integers. |
+| `!` `-` | |
+| `.field` `[index]` `.Method()` | |
+
+Arithmetic on two integers produces an integer; mixing in a float produces a float.
+
+**Statements** are assignments (`=`, `+=`, `-=`, `*=`, `/=`) to variables, fields or
+elements (`order.lines[0].price *= 2;`), or function and method calls.
+
+**Comments** use `//` and `/* */`.
 
 ## Functions
 
-Built-in functions:
+All of Grule's built-in functions are available:
 
-| Function | Description |
+| Kind | Functions |
 |---|---|
-| `Retract("Rule")` | Stop a rule from firing again in this execution (statement only) |
-| `Now()` | Current Unix time in seconds |
-| `Abs(x)`, `Ceil(x)`, `Floor(x)`, `Sqrt(x)`, `Pow(x, y)` | Math |
-| `Max(a, b, ...)`, `Min(a, b, ...)` | Largest / smallest of the arguments |
-| `IsNil(x)` | Whether `x` is `nil` |
+| Engine | `Retract(name)`, `Complete()` (statements only); `Changed(name)`, `Forget(name)` (accepted, no effect) |
+| Logging | `Log(value)`, `LogFormat(format, value)`, through the `log` crate (target `grule`) |
+| Checks | `IsNil(x)`, `IsZero(x)`, `StringContains(s, sub)` |
+| Time | `Now()`, `MakeTime(y, mo, d, h, mi, s)`, `GetTimeYear/Month/Day/Hour/Minute/Second(t)`, `IsTimeBefore(t, u)`, `IsTimeAfter(t, u)`, `TimeFormat(t, layout)` with Go layouts such as `"2006-01-02 15:04:05"` |
+| Math | `Max`, `Min`, `Abs`, `Ceil`, `Floor`, `Round`, `RoundToEven`, `Trunc`, `Sqrt`, `Cbrt`, `Pow`, `Pow10`, `Exp`, `Exp2`, `Expm1`, `MathLog`, `Log10`, `Log1p`, `Log2`, `Logb`, `Ilogb`, `Mod`, `Remainder`, `Dim`, `Copysign`, `Hypot`, `Ldexp`, `Sin`, `Cos`, `Tan`, `Asin`, `Acos`, `Atan`, `Atan2`, `Sinh`, `Cosh`, `Tanh`, `Asinh`, `Acosh`, `Atanh`, `Erf`, `Erfc`, `Erfinv`, `Erfcinv`, `Gamma`, `J0`, `J1`, `Jn`, `IsInf`, `IsNaN`, `NaN`, `Signbit`, `Float64bits`, `Float64frombits` |
 
-Built-in methods:
+And methods:
 
 | Type | Methods |
 |---|---|
-| string | `Len()`, `ToUpper()`, `ToLower()`, `Trim()`, `Contains(s)`, `HasPrefix(s)`, `HasSuffix(s)`, `Index(s)`, `LastIndex(s)` |
-| array | `Len()`, `Contains(x)` |
+| string | `Len()`, `Compare(s)`, `Contains(s)`, `In(s, ...)`, `Count(s)`, `HasPrefix(s)`, `HasSuffix(s)`, `Index(s)`, `LastIndex(s)`, `Repeat(n)`, `Replace(old, new)`, `Split(sep)`, `ToLower()`, `ToUpper()`, `Trim()`, `MatchString(regex)` |
+| array | `Len()`, `Append(x, ...)`, `Contains(x)` |
 | object | `Len()` |
 
-You can register your own functions:
+As in Go, string lengths and positions count bytes.
+
+### Your own functions and methods
 
 ```rust
-engine.register_function("Percent", |args| match args {
-    [FactValue::Number(n), FactValue::Number(p)] => Ok(FactValue::Number(n * p / 100.0)),
+engine.register_function("Percent", |args| match (args[0].as_number(), args[1].as_number()) {
+    (Some(n), Some(p)) => Ok(FactValue::Float(n * p / 100.0)),
     _ => Err("expected two numbers".to_string()),
 })?;
-// GRL: then order.discount = Percent(order.total, 10);
+// GRL: then Order.Discount = Percent(Order.Total, 10);
+
+engine.register_method("Charge", |account, args| {
+    // `account` is the stored value when called as a statement on a fact path
+    // (`Account.Charge(10);`), so changes to it persist
+    Ok(FactValue::Null)
+})?;
 ```
+
+Methods correspond to calling methods on Go facts in Grule. A method called as a
+statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
+`Account.Charge(10);`) changes the stored fact; anywhere else it works on a copy.
+
+## Differences from Grule
+
+- There is no RETE working memory caching expression results between cycles; every
+  condition is re-evaluated each cycle. `Changed` and `Forget` are therefore no-ops.
+- There is no knowledge library with named, versioned knowledge bases; an engine holds
+  one set of rules. Rules load from GRL text and files (not Grule's JSON rule format,
+  URLs or bundles).
+- Facts are dynamic values rather than Go structs. Unsigned integers above `i64::MAX`
+  become floats, and `Float64bits` returns its 64 bits as a signed integer.
+- `nil` can be compared with `==` against any value (it equals only `nil`).
 
 ## Benchmarks
 
 `cargo bench` runs criterion benchmarks (`benches/grule_comparison.rs`) that mirror
 Grule's own: loading 100 and 1000 rules, and executing a fact against them, using the same
 rule set as Grule's `examples/benchmark/*.grl`. An extra `execute/no_match` case runs a
-fact that matches no rule, so every condition is evaluated. That makes it the fairer
-comparison with Grule's execution numbers, because Grule evaluates every rule each cycle
-while this engine stops at the first match.
-
-## Core Components
-
-### Rules
-
-A rule consists of:
-- Name: Unique identifier
-- Description: Optional explanation
-- Salience: Priority (higher salience rules execute first)
-- When condition: Expression evaluated against facts
-- Then actions: Operations performed when condition is true
-
-### Facts
-
-Facts are the data that rules operate on. They can be:
-- Simple values (strings, numbers, booleans)
-- Structured objects with fields
-- Arrays
-
-### Expressions
-
-The rule engine supports various expressions:
-- Literals (string, number, boolean)
-- Variables and field access
-- Arithmetic operations (+, -, *, /)
-- Comparison operations (==, !=, <, <=, >, >=)
-- Logical operations (AND, OR, NOT)
+fact that matches no rule.
 
 ## License
 

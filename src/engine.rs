@@ -1,11 +1,15 @@
 use crate::ast::Expression;
 use crate::facts::{Fact, FactValue};
-use crate::functions::{self, Function};
+use crate::functions::{self, Function, Method};
 use crate::knowledge_base::KnowledgeBase;
+use crate::operators;
 use crate::rule::Rule;
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Write;
+use std::fmt::{self, Write};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use thiserror::Error;
 
 /// Maximum number of rule firings per execution, matching Grule's default.
@@ -29,6 +33,61 @@ pub enum EngineError {
     UnknownRule(String),
     #[error("Rules fired {0} times without settling; a rule's actions may never make its condition false (consider Retract)")]
     MaxCyclesExceeded(usize),
+    #[error("Execution was cancelled")]
+    Cancelled,
+    /// An error raised while evaluating or executing a specific rule.
+    #[error("Rule '{rule}' failed in its {phase} scope: {source}")]
+    InRule {
+        rule: String,
+        phase: RulePhase,
+        #[source]
+        source: Box<EngineError>,
+    },
+}
+
+impl EngineError {
+    /// The underlying error, without the rule it occurred in.
+    pub fn root(&self) -> &EngineError {
+        match self {
+            EngineError::InRule { source, .. } => source.root(),
+            other => other,
+        }
+    }
+
+    fn in_rule(self, rule: &Rule, phase: RulePhase) -> EngineError {
+        EngineError::InRule {
+            rule: rule.name.clone(),
+            phase,
+            source: Box::new(self),
+        }
+    }
+}
+
+/// Which part of a rule an error came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulePhase {
+    When,
+    Then,
+}
+
+impl fmt::Display for RulePhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RulePhase::When => "when",
+            RulePhase::Then => "then",
+        })
+    }
+}
+
+/// Receives notifications as the engine runs, like Grule's `GruleEngineListener`.
+/// All methods do nothing by default.
+pub trait EngineListener: Send + Sync {
+    /// A new cycle is starting (cycles are numbered from 1).
+    fn begin_cycle(&self, _cycle: u64) {}
+    /// A rule's condition was evaluated; `matched` is whether it held.
+    fn evaluate_rule(&self, _cycle: u64, _rule: &Rule, _matched: bool) {}
+    /// A rule was chosen and its actions are about to run.
+    fn execute_rule(&self, _cycle: u64, _rule: &Rule) {}
 }
 
 #[derive(Debug, Clone)]
@@ -61,16 +120,19 @@ struct ExecutionState {
     completed: bool,
 }
 
-/// One step of an assignment target, e.g. `.customer` or `[0]`.
+/// One step of a path into a fact, e.g. `.customer` or `[0]`.
 enum Key {
     Field(String),
-    Index(f64),
+    Index(i64),
 }
 
 pub struct RuleEngine {
     knowledge_base: KnowledgeBase,
     functions: HashMap<String, Box<Function>>,
+    methods: HashMap<String, Box<Method>>,
     max_cycles: usize,
+    return_err_on_failed_rule_evaluation: bool,
+    listeners: Vec<Box<dyn EngineListener>>,
 }
 
 impl RuleEngine {
@@ -78,7 +140,10 @@ impl RuleEngine {
         Self {
             knowledge_base: KnowledgeBase::new(),
             functions: HashMap::new(),
+            methods: HashMap::new(),
             max_cycles: DEFAULT_MAX_CYCLES,
+            return_err_on_failed_rule_evaluation: false,
+            listeners: Vec::new(),
         }
     }
 
@@ -86,10 +151,36 @@ impl RuleEngine {
         self.knowledge_base.add_rule(rule)
     }
 
+    /// Parses GRL text and adds all of its rules. Returns how many were added.
+    pub fn add_rules_from_str(&mut self, grl: &str) -> Result<usize, String> {
+        self.knowledge_base.add_rules_from_str(grl)
+    }
+
+    /// Loads all rules from a `.grl` file. Returns how many were added.
+    pub fn add_rules_from_file(&mut self, path: impl AsRef<Path>) -> Result<usize, String> {
+        self.knowledge_base.add_rules_from_file(path)
+    }
+
+    /// Loads all `.grl` files under `dir`, recursively. Returns how many rules were added.
+    pub fn add_rules_from_dir(&mut self, dir: impl AsRef<Path>) -> Result<usize, String> {
+        self.knowledge_base.add_rules_from_dir(dir)
+    }
+
     /// Sets the maximum number of rule firings per execution before it fails
     /// with `EngineError::MaxCyclesExceeded`.
     pub fn set_max_cycles(&mut self, max_cycles: usize) {
         self.max_cycles = max_cycles;
+    }
+
+    /// By default, as in Grule, a condition that fails to evaluate (a missing field,
+    /// a type error, ...) is logged and treated as false. When enabled, execution
+    /// stops with the error instead.
+    pub fn set_return_err_on_failed_rule_evaluation(&mut self, enabled: bool) {
+        self.return_err_on_failed_rule_evaluation = enabled;
+    }
+
+    pub fn add_listener(&mut self, listener: impl EngineListener + 'static) {
+        self.listeners.push(Box::new(listener));
     }
 
     /// Makes `function` callable from rules as `name(args...)`.
@@ -107,26 +198,78 @@ impl RuleEngine {
         Ok(())
     }
 
-    /// Runs rules until no condition holds, as Grule does: each cycle fires the
-    /// highest-salience rule whose condition is true (ties go to the rule added first),
-    /// then re-evaluates from the top. Rules removed with `Retract` stay out for the
-    /// rest of this execution, and `Complete()` ends it once the current rule's
-    /// actions have run.
+    /// Makes `method` callable from rules as `receiver.name(args...)` on any value
+    /// that has no built-in method of that name. This is the equivalent of calling a
+    /// method on a Go fact in Grule: when called as a statement in a rule's `then`
+    /// scope on a fact path (`Order.AddItem(x);`), the method receives the stored
+    /// value and its changes persist. Anywhere else it receives a copy.
+    pub fn register_method<F>(&mut self, name: &str, method: F) -> Result<(), String>
+    where
+        F: Fn(&mut FactValue, &[FactValue]) -> Result<FactValue, String> + Send + Sync + 'static,
+    {
+        if self.methods.contains_key(name) {
+            return Err(format!("Method '{}' is already registered", name));
+        }
+        self.methods.insert(name.to_string(), Box::new(method));
+        Ok(())
+    }
+
+    /// Runs rules until no condition holds, as Grule does. Each cycle evaluates every
+    /// rule's condition, then fires the highest-salience rule among those that matched
+    /// (ties go to the rule added first). Rules removed with `Retract` stay out for the
+    /// rest of this execution, and `Complete()` ends it once the current rule's actions
+    /// have run.
     pub fn execute(
         &self,
         facts: &mut HashMap<String, Fact>,
     ) -> Result<ExecutionResult, EngineError> {
+        self.execute_with_cancel(facts, &AtomicBool::new(false))
+    }
+
+    /// Like `execute`, but stops with `EngineError::Cancelled` once `cancel` is set,
+    /// checked before each rule evaluation. Set it from another thread, e.g. on a timeout.
+    pub fn execute_with_cancel(
+        &self,
+        facts: &mut HashMap<String, Fact>,
+        cancel: &AtomicBool,
+    ) -> Result<ExecutionResult, EngineError> {
         let start_time = std::time::Instant::now();
         let mut result = ExecutionResult::new();
-
         let mut state = ExecutionState::default();
+        let mut cycle: u64 = 0;
 
-        while let Some(rule) = self.next_rule(&state.retracted, facts)? {
-            if result.rules_fired.len() == self.max_cycles {
+        loop {
+            check_cancel(cancel)?;
+            self.listeners.iter().for_each(|l| l.begin_cycle(cycle + 1));
+
+            let mut selected = None;
+            for rule in self.knowledge_base.rules_by_salience() {
+                check_cancel(cancel)?;
+                if state.retracted.contains(&rule.name) {
+                    continue;
+                }
+                let matched = self.test_rule(rule, facts)?;
+                self.listeners
+                    .iter()
+                    .for_each(|l| l.evaluate_rule(cycle + 1, rule, matched));
+                // Rules come in salience order, so the first match has the highest salience
+                if matched && selected.is_none() {
+                    selected = Some(rule);
+                }
+            }
+
+            let Some(rule) = selected else { break };
+            cycle += 1;
+            if cycle > self.max_cycles as u64 {
                 return Err(EngineError::MaxCyclesExceeded(self.max_cycles));
             }
+
+            self.listeners
+                .iter()
+                .for_each(|l| l.execute_rule(cycle, rule));
             for action in &rule.then_actions {
-                self.execute_action(action, facts, &mut state)?;
+                self.execute_action(action, facts, &mut state)
+                    .map_err(|e| e.in_rule(rule, RulePhase::Then))?;
             }
             result.rules_fired.push(rule.name.clone());
             if state.completed {
@@ -138,27 +281,42 @@ impl RuleEngine {
         Ok(result)
     }
 
-    fn next_rule(
+    /// Returns the rules whose conditions currently hold, highest salience first,
+    /// without running any of them (Grule's `FetchMatchingRules`).
+    pub fn fetch_matching_rules(
         &self,
-        retracted: &HashSet<String>,
         facts: &HashMap<String, Fact>,
-    ) -> Result<Option<&Rule>, EngineError> {
+    ) -> Result<Vec<&Rule>, EngineError> {
+        let mut matching = Vec::new();
         for rule in self.knowledge_base.rules_by_salience() {
-            if !retracted.contains(&rule.name)
-                && self.evaluate_condition(&rule.when_condition, facts)?
-            {
-                return Ok(Some(rule));
+            if self.test_rule(rule, facts)? {
+                matching.push(rule);
             }
         }
-        Ok(None)
+        Ok(matching)
+    }
+
+    /// Evaluates a rule's condition, applying the failed-evaluation policy.
+    fn test_rule(&self, rule: &Rule, facts: &HashMap<String, Fact>) -> Result<bool, EngineError> {
+        match self.evaluate_condition(&rule.when_condition, facts, "rule condition") {
+            Ok(matched) => Ok(matched),
+            Err(e) if self.return_err_on_failed_rule_evaluation => {
+                Err(e.in_rule(rule, RulePhase::When))
+            }
+            Err(e) => {
+                log::warn!("Failed testing condition for rule {}: {}", rule.name, e);
+                Ok(false)
+            }
+        }
     }
 
     fn evaluate_condition(
         &self,
         expr: &Expression,
         facts: &HashMap<String, Fact>,
+        operation: &str,
     ) -> Result<bool, EngineError> {
-        Ok(self.eval(expr, facts)?.is_truthy())
+        operators::boolean(&*self.eval(expr, facts)?, operation)
     }
 
     fn evaluate_expression(
@@ -177,9 +335,28 @@ impl RuleEngine {
         facts: &'f HashMap<String, Fact>,
     ) -> Result<Cow<'f, FactValue>, EngineError> {
         let owned = |value| Ok(Cow::Owned(value));
+        let binary = |left: &Expression,
+                      right: &Expression,
+                      op: fn(&FactValue, &FactValue) -> Result<FactValue, EngineError>|
+         -> Result<Cow<'f, FactValue>, EngineError> {
+            Ok(Cow::Owned(op(
+                &*self.eval(left, facts)?,
+                &*self.eval(right, facts)?,
+            )?))
+        };
+        let compare = |left: &Expression,
+                       right: &Expression,
+                       test: fn(Ordering) -> bool|
+         -> Result<Cow<'f, FactValue>, EngineError> {
+            let ordering =
+                operators::compare(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?;
+            Ok(Cow::Owned(FactValue::Boolean(ordering.is_some_and(test))))
+        };
+
         match expr {
             Expression::String(s) => owned(FactValue::String(s.clone())),
-            Expression::Number(n) => owned(FactValue::Number(*n)),
+            Expression::Integer(n) => owned(FactValue::Integer(*n)),
+            Expression::Float(n) => owned(FactValue::Float(*n)),
             Expression::Boolean(b) => owned(FactValue::Boolean(*b)),
             Expression::Nil => owned(FactValue::Null),
 
@@ -193,9 +370,11 @@ impl RuleEngine {
                     FactValue::Object(obj) => obj.get(field).ok_or_else(|| {
                         EngineError::EvaluationError(format!("Field '{}' not found", field))
                     }),
-                    _ => Err(EngineError::TypeError(
-                        "Cannot access field on non-object".to_string(),
-                    )),
+                    other => Err(EngineError::TypeError(format!(
+                        "Cannot access field '{}' on {}",
+                        field,
+                        other.type_name()
+                    ))),
                 })
             }
 
@@ -203,7 +382,7 @@ impl RuleEngine {
                 let index = self.eval(index_expr, facts)?;
                 project(self.eval(container_expr, facts)?, |container| {
                     match (container, &*index) {
-                        (FactValue::Array(items), FactValue::Number(n)) => {
+                        (FactValue::Array(items), FactValue::Integer(n)) => {
                             Ok(&items[array_index(*n, items.len())?])
                         }
                         (FactValue::Object(obj), FactValue::String(key)) => {
@@ -243,99 +422,51 @@ impl RuleEngine {
             Expression::MethodCall(target_expr, name, args) => {
                 let target = self.eval(target_expr, facts)?;
                 let args = self.evaluate_args(args, facts)?;
-                functions::call_method(&target, name, &args)
-                    .map(Cow::Owned)
-                    .map_err(EngineError::FunctionError)
-            }
-
-            Expression::Add(left, right) => {
-                let (left, right) = (self.eval(left, facts)?, self.eval(right, facts)?);
-                match (&*left, &*right) {
-                    (FactValue::Number(a), FactValue::Number(b)) => owned(FactValue::Number(a + b)),
-                    (FactValue::String(a), FactValue::String(b)) => {
-                        owned(FactValue::String(format!("{}{}", a, b)))
-                    }
-                    _ => Err(EngineError::TypeError("Cannot add these types".to_string())),
+                if let Some(result) = functions::call_method(&target, name, &args) {
+                    return result.map(Cow::Owned).map_err(EngineError::FunctionError);
                 }
-            }
-            Expression::Subtract(left, right) => {
-                self.arithmetic(left, right, facts, "subtract", |a, b| Ok(a - b))
-            }
-            Expression::Multiply(left, right) => {
-                self.arithmetic(left, right, facts, "multiply", |a, b| Ok(a * b))
-            }
-            Expression::Divide(left, right) => {
-                self.arithmetic(left, right, facts, "divide", |a, b| {
-                    if b == 0.0 {
-                        Err(EngineError::DivisionByZero)
-                    } else {
-                        Ok(a / b)
-                    }
-                })
+                // Methods that may change their receiver run on a copy here
+                let mut receiver = target.into_owned();
+                self.call_method_mut(&mut receiver, name, &args)
+                    .map(Cow::Owned)
             }
 
-            Expression::Equal(left, right) => owned(FactValue::Boolean(
-                self.eval(left, facts)? == self.eval(right, facts)?,
-            )),
-            Expression::NotEqual(left, right) => owned(FactValue::Boolean(
-                self.eval(left, facts)? != self.eval(right, facts)?,
-            )),
-            Expression::LessThan(left, right) => self.compare(left, right, facts, |a, b| a < b),
-            Expression::LessEqual(left, right) => self.compare(left, right, facts, |a, b| a <= b),
-            Expression::GreaterThan(left, right) => self.compare(left, right, facts, |a, b| a > b),
-            Expression::GreaterEqual(left, right) => {
-                self.compare(left, right, facts, |a, b| a >= b)
-            }
+            Expression::Add(left, right) => binary(left, right, operators::add),
+            Expression::Subtract(left, right) => binary(left, right, operators::subtract),
+            Expression::Multiply(left, right) => binary(left, right, operators::multiply),
+            Expression::Divide(left, right) => binary(left, right, operators::divide),
+            Expression::Modulo(left, right) => binary(left, right, operators::modulo),
+            Expression::BitAnd(left, right) => binary(left, right, operators::bit_and),
+            Expression::BitOr(left, right) => binary(left, right, operators::bit_or),
+
+            Expression::Equal(left, right) => owned(FactValue::Boolean(operators::equal(
+                &*self.eval(left, facts)?,
+                &*self.eval(right, facts)?,
+            )?)),
+            Expression::NotEqual(left, right) => owned(FactValue::Boolean(!operators::equal(
+                &*self.eval(left, facts)?,
+                &*self.eval(right, facts)?,
+            )?)),
+            Expression::LessThan(left, right) => compare(left, right, Ordering::is_lt),
+            Expression::LessEqual(left, right) => compare(left, right, Ordering::is_le),
+            Expression::GreaterThan(left, right) => compare(left, right, Ordering::is_gt),
+            Expression::GreaterEqual(left, right) => compare(left, right, Ordering::is_ge),
 
             // && and || short-circuit, so the right side is only evaluated when needed
             Expression::And(left, right) => owned(FactValue::Boolean(
-                self.evaluate_condition(left, facts)? && self.evaluate_condition(right, facts)?,
+                self.evaluate_condition(left, facts, "logical AND")?
+                    && self.evaluate_condition(right, facts, "logical AND")?,
             )),
             Expression::Or(left, right) => owned(FactValue::Boolean(
-                self.evaluate_condition(left, facts)? || self.evaluate_condition(right, facts)?,
+                self.evaluate_condition(left, facts, "logical OR")?
+                    || self.evaluate_condition(right, facts, "logical OR")?,
             )),
-            Expression::Not(expr) => {
-                owned(FactValue::Boolean(!self.evaluate_condition(expr, facts)?))
-            }
+            Expression::Not(expr) => owned(FactValue::Boolean(
+                !self.evaluate_condition(expr, facts, "negation")?,
+            )),
 
             Expression::Assign(..) => Err(EngineError::EvaluationError(
                 "Assignment cannot be used as a value".to_string(),
-            )),
-        }
-    }
-
-    fn arithmetic<'f>(
-        &self,
-        left: &Expression,
-        right: &Expression,
-        facts: &'f HashMap<String, Fact>,
-        verb: &str,
-        op: impl Fn(f64, f64) -> Result<f64, EngineError>,
-    ) -> Result<Cow<'f, FactValue>, EngineError> {
-        match (&*self.eval(left, facts)?, &*self.eval(right, facts)?) {
-            (FactValue::Number(a), FactValue::Number(b)) => {
-                Ok(Cow::Owned(FactValue::Number(op(*a, *b)?)))
-            }
-            _ => Err(EngineError::TypeError(format!(
-                "Cannot {} these types",
-                verb
-            ))),
-        }
-    }
-
-    fn compare<'f>(
-        &self,
-        left: &Expression,
-        right: &Expression,
-        facts: &'f HashMap<String, Fact>,
-        op: impl Fn(f64, f64) -> bool,
-    ) -> Result<Cow<'f, FactValue>, EngineError> {
-        match (&*self.eval(left, facts)?, &*self.eval(right, facts)?) {
-            (FactValue::Number(a), FactValue::Number(b)) => {
-                Ok(Cow::Owned(FactValue::Boolean(op(*a, *b))))
-            }
-            _ => Err(EngineError::TypeError(
-                "Cannot compare these types".to_string(),
             )),
         }
     }
@@ -348,6 +479,27 @@ impl RuleEngine {
         args.iter()
             .map(|arg| self.evaluate_expression(arg, facts))
             .collect()
+    }
+
+    /// Calls a method that may change its receiver: a built-in like `Append`,
+    /// or a user-registered method.
+    fn call_method_mut(
+        &self,
+        receiver: &mut FactValue,
+        name: &str,
+        args: &[FactValue],
+    ) -> Result<FactValue, EngineError> {
+        if let Some(result) = functions::call_method_mut(receiver, name, args) {
+            return result.map_err(EngineError::FunctionError);
+        }
+        let method = self.methods.get(name).ok_or_else(|| {
+            EngineError::FunctionError(format!(
+                "Unknown method '{}' on {}",
+                name,
+                receiver.type_name()
+            ))
+        })?;
+        method(receiver, args).map_err(|e| EngineError::FunctionError(format!("{}(): {}", name, e)))
     }
 
     fn execute_action(
@@ -396,7 +548,21 @@ impl RuleEngine {
                 Ok(())
             }
 
-            // Called for their effect on the host; the result is discarded
+            // A method called on a fact path operates on the stored value, so
+            // `Order.Items.Append(x);` changes the fact
+            Expression::MethodCall(target, name, args) if target.is_assignable() => {
+                let args = self.evaluate_args(args, facts)?;
+                if let Some(result) =
+                    functions::call_method(&*self.eval(target, facts)?, name, &args)
+                {
+                    // A built-in that never changes its receiver
+                    return result.map(|_| ()).map_err(EngineError::FunctionError);
+                }
+                let receiver = self.resolve_mut(target, facts)?;
+                self.call_method_mut(receiver, name, &args).map(|_| ())
+            }
+
+            // Called for their effect; the result is discarded
             Expression::Call(..) | Expression::MethodCall(..) => {
                 self.evaluate_expression(action, facts)?;
                 Ok(())
@@ -415,45 +581,14 @@ impl RuleEngine {
         value: FactValue,
         facts: &mut HashMap<String, Fact>,
     ) -> Result<(), EngineError> {
-        // Index expressions are evaluated up front, before borrowing facts mutably
-        let (root, keys) = self.assignment_path(target, facts)?;
+        let (root, keys) = self.target_path(target, facts)?;
 
-        let Some((last, intermediate)) = keys.split_last() else {
+        let Some((last, parent_keys)) = keys.split_last() else {
             facts.insert(root.clone(), Fact::new(root, value));
             return Ok(());
         };
 
-        let fact = facts
-            .get_mut(&root)
-            .ok_or_else(|| EngineError::UnknownVariable(root.clone()))?;
-
-        // Walk down to the object or array that owns the final key
-        let mut current = &mut fact.value;
-        for (depth, key) in intermediate.iter().enumerate() {
-            current = match (current, key) {
-                (FactValue::Object(obj), Key::Field(field)) => {
-                    obj.get_mut(field).ok_or_else(|| {
-                        EngineError::EvaluationError(format!(
-                            "Field '{}' not found",
-                            describe_path(&root, &keys[..=depth])
-                        ))
-                    })?
-                }
-                (FactValue::Array(items), Key::Index(n)) => {
-                    let i = array_index(*n, items.len())?;
-                    &mut items[i]
-                }
-                (other, key) => {
-                    return Err(key_mismatch(
-                        other,
-                        key,
-                        &describe_path(&root, &keys[..depth]),
-                    ))
-                }
-            };
-        }
-
-        match (current, last) {
+        match (walk_mut(facts, &root, &keys, parent_keys.len())?, last) {
             (FactValue::Object(obj), Key::Field(field)) => {
                 obj.insert(field.clone(), value);
                 Ok(())
@@ -463,17 +598,24 @@ impl RuleEngine {
                 items[i] = value;
                 Ok(())
             }
-            (other, key) => Err(key_mismatch(
-                other,
-                key,
-                &describe_path(&root, intermediate),
-            )),
+            (other, key) => Err(key_mismatch(other, key, &describe_path(&root, parent_keys))),
         }
     }
 
-    /// Splits an assignment target like `order.items[i].price` into its root
-    /// variable and the keys leading from it.
-    fn assignment_path(
+    /// Finds the stored value a path like `order.items[0]` refers to.
+    fn resolve_mut<'f>(
+        &self,
+        target: &Expression,
+        facts: &'f mut HashMap<String, Fact>,
+    ) -> Result<&'f mut FactValue, EngineError> {
+        let (root, keys) = self.target_path(target, facts)?;
+        walk_mut(facts, &root, &keys, keys.len())
+    }
+
+    /// Splits a path like `order.items[i].price` into its root variable and the keys
+    /// leading from it. Index expressions are evaluated here, before facts are
+    /// borrowed mutably.
+    fn target_path(
         &self,
         target: &Expression,
         facts: &HashMap<String, Fact>,
@@ -481,14 +623,14 @@ impl RuleEngine {
         match target {
             Expression::Variable(name) => Ok((name.clone(), Vec::new())),
             Expression::FieldAccess(inner, field) => {
-                let (root, mut keys) = self.assignment_path(inner, facts)?;
+                let (root, mut keys) = self.target_path(inner, facts)?;
                 keys.push(Key::Field(field.clone()));
                 Ok((root, keys))
             }
             Expression::Index(inner, index) => {
-                let (root, mut keys) = self.assignment_path(inner, facts)?;
+                let (root, mut keys) = self.target_path(inner, facts)?;
                 keys.push(match self.evaluate_expression(index, facts)? {
-                    FactValue::Number(n) => Key::Index(n),
+                    FactValue::Integer(n) => Key::Index(n),
                     FactValue::String(s) => Key::Field(s),
                     other => {
                         return Err(EngineError::TypeError(format!(
@@ -510,6 +652,56 @@ impl RuleEngine {
     }
 }
 
+impl Default for RuleEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn check_cancel(cancel: &AtomicBool) -> Result<(), EngineError> {
+    if cancel.load(AtomicOrdering::Relaxed) {
+        Err(EngineError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+/// Follows the first `depth` keys from the fact `root`, returning the value reached.
+/// Every step must already exist.
+fn walk_mut<'f>(
+    facts: &'f mut HashMap<String, Fact>,
+    root: &str,
+    keys: &[Key],
+    depth: usize,
+) -> Result<&'f mut FactValue, EngineError> {
+    let fact = facts
+        .get_mut(root)
+        .ok_or_else(|| EngineError::UnknownVariable(root.to_string()))?;
+    let mut current = &mut fact.value;
+    for (step, key) in keys[..depth].iter().enumerate() {
+        current = match (current, key) {
+            (FactValue::Object(obj), Key::Field(field)) => obj.get_mut(field).ok_or_else(|| {
+                EngineError::EvaluationError(format!(
+                    "Field '{}' not found",
+                    describe_path(root, &keys[..=step])
+                ))
+            })?,
+            (FactValue::Array(items), Key::Index(n)) => {
+                let i = array_index(*n, items.len())?;
+                &mut items[i]
+            }
+            (other, key) => {
+                return Err(key_mismatch(
+                    other,
+                    key,
+                    &describe_path(root, &keys[..step]),
+                ))
+            }
+        };
+    }
+    Ok(current)
+}
+
 /// Narrows a value to a part of it (a field or element), borrowing when the value
 /// itself is borrowed and cloning just the part when it was computed.
 fn project<'f>(
@@ -522,14 +714,8 @@ fn project<'f>(
     }
 }
 
-impl Default for RuleEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn array_index(n: f64, len: usize) -> Result<usize, EngineError> {
-    if n < 0.0 || n.fract() != 0.0 {
+fn array_index(n: i64, len: usize) -> Result<usize, EngineError> {
+    if n < 0 {
         Err(EngineError::EvaluationError(format!(
             "Invalid array index: {}",
             n
@@ -587,14 +773,14 @@ mod tests {
             (
                 "customer",
                 obj(vec![
-                    ("age", FactValue::Number(30.0)),
+                    ("age", FactValue::Integer(30)),
                     (
                         "address",
                         obj(vec![("city", FactValue::String("Porto".to_string()))]),
                     ),
                 ]),
             ),
-            ("total", FactValue::Number(100.0)),
+            ("total", FactValue::Integer(100)),
         ]);
         HashMap::from([("order".to_string(), Fact::new("order".to_string(), order))])
     }
@@ -631,10 +817,7 @@ mod tests {
                 .unwrap()["city"],
             FactValue::String("Lisbon".to_string())
         );
-        assert_eq!(
-            customer_field(&facts, "age"),
-            Some(&FactValue::Number(31.0))
-        );
+        assert_eq!(customer_field(&facts, "age"), Some(&FactValue::Integer(31)));
     }
 
     #[test]
@@ -670,7 +853,7 @@ mod tests {
             &mut facts,
         )
         .unwrap_err();
-        assert!(matches!(err, EngineError::TypeError(_)), "{}", err);
+        assert!(matches!(err.root(), EngineError::TypeError(_)), "{}", err);
         assert!(err.to_string().contains("order.total"), "{}", err);
     }
 
@@ -678,6 +861,6 @@ mod tests {
     fn test_nested_assignment_unknown_root() {
         let mut facts = order_facts();
         let err = run("rule R { when true then invoice.total = 1; }", &mut facts).unwrap_err();
-        assert!(matches!(err, EngineError::UnknownVariable(ref name) if name == "invoice"));
+        assert!(matches!(err.root(), EngineError::UnknownVariable(name) if name == "invoice"));
     }
 }
