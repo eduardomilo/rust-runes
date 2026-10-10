@@ -1,0 +1,17 @@
+// Rules for the quickstart example
+rule LongRide "Long rides get a flat rate" salience 10 {
+    when
+        Ride.Distance > 5000 && !Ride.Priced
+    then
+        Ride.NetAmount = 143.32;
+        Ride.Priced = true;
+        Log("Priced a long ride of " + Ride.Distance + "m");
+}
+
+rule ShortRide "Short rides are priced per meter" {
+    when
+        Ride.Distance <= 5000 && !Ride.Priced
+    then
+        Ride.NetAmount = Ride.Distance * 0.025;
+        Ride.Priced = true;
+}

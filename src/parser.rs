@@ -14,11 +14,16 @@ mod grammar {
 
 use grammar::{GrlGrammar, Rule as GrammarRule};
 
+/// Parses GRL (Grule Rule Language) text into [`Rule`]s.
+///
+/// Most code doesn't need this directly: [`RuleEngine::add_rules_from_str`](crate::RuleEngine::add_rules_from_str)
+/// and the file loaders use it.
 pub struct GrlParser {
     pratt: PrattParser<GrammarRule>,
 }
 
 impl GrlParser {
+    /// A parser.
     pub fn new() -> Self {
         // Lowest precedence first, matching Grule: all comparisons share one level,
         // and `&` / `|` bind like `+` / `-`

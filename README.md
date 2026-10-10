@@ -6,12 +6,16 @@ A rule engine for embedding business logic in Rust applications, compatible with
 [Grule](https://github.com/hyperjumptech/grule-rule-engine)'s rule language (GRL) and
 execution model. Grule's own `.grl` files load unchanged.
 
+This is an independent implementation; it is not affiliated with the Grule project.
+
 ## Installation
 
 ```toml
 [dependencies]
 rust-runes = "0.1.0"
 ```
+
+Requires Rust 1.82 or later.
 
 ## Quick Start
 
@@ -76,6 +80,15 @@ struct Order {
 Rules can also be loaded with `add_rules_from_file(path)` or `add_rules_from_str(grl)`, or
 built in code with `Rule::new` and the `ast::Expression` constructors. Loading reports the
 file, line and column of syntax errors, and adds nothing from a file that fails.
+
+More complete programs are in [`examples/`](examples):
+
+- `quickstart`: rules from a `.grl` file, run against a serde struct
+- `methods`: methods on your own types called from rules, and an `Out` fact that rules
+  report rejection reasons into
+- `speed_up`: Grule's classic `TestCar` rule firing cycle after cycle, with a listener
+
+Run one with `cargo run --example quickstart`.
 
 ## Execution Model
 

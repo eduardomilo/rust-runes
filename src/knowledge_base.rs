@@ -4,6 +4,10 @@ use crate::rule::Rule;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// A set of rules, kept in salience order and compiled for execution.
+///
+/// A [`RuleEngine`](crate::RuleEngine) holds one; rules are usually added through the
+/// engine's `add_rules_from_*` methods.
 #[derive(Debug, Default)]
 pub struct KnowledgeBase {
     rules: Vec<Rule>,
@@ -26,10 +30,12 @@ pub struct KnowledgeBase {
 }
 
 impl KnowledgeBase {
+    /// An empty knowledge base.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Adds a rule. Fails if a rule with the same name exists.
     pub fn add_rule(&mut self, rule: Rule) -> Result<(), String> {
         if self.rule_index.contains_key(&rule.name) {
             return Err(format!("Rule '{}' already exists", rule.name));
@@ -91,16 +97,20 @@ impl KnowledgeBase {
         Ok(count)
     }
 
+    /// The rule with the given name.
     pub fn get_rule(&self, name: &str) -> Option<&Rule> {
         self.rule_index
             .get(name)
             .and_then(|&index| self.rules.get(index))
     }
 
+    /// All rules, in the order they were added.
     pub fn get_rules(&self) -> &[Rule] {
         &self.rules
     }
 
+    /// All rules, highest salience first; rules with equal salience in the order they
+    /// were added.
     pub fn get_rules_sorted_by_salience(&self) -> Vec<&Rule> {
         self.rules_by_salience().collect()
     }
@@ -148,6 +158,7 @@ impl KnowledgeBase {
         self.readers.add(index, &compiled.reads);
     }
 
+    /// Removes and returns the rule with the given name.
     pub fn remove_rule(&mut self, name: &str) -> Option<Rule> {
         if let Some(&index) = self.rule_index.get(name) {
             let rule = self.rules.remove(index);
@@ -185,6 +196,7 @@ impl KnowledgeBase {
         }
     }
 
+    /// Removes all rules.
     pub fn clear(&mut self) {
         self.rules.clear();
         self.rule_index.clear();
@@ -197,10 +209,12 @@ impl KnowledgeBase {
         self.conditions_with_methods = 0;
     }
 
+    /// The number of rules.
     pub fn len(&self) -> usize {
         self.rules.len()
     }
 
+    /// Whether there are no rules.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }

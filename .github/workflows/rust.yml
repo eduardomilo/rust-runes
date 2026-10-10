@@ -28,3 +28,13 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Keep in sync with `rust-version` in Cargo.toml. Only the library is built:
+      # dev-dependencies (criterion) need a newer toolchain.
+      - uses: dtolnay/rust-toolchain@1.82
+      - run: cargo build --lib --locked

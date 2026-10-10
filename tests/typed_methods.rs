@@ -260,3 +260,32 @@ fn argument_and_receiver_errors() {
         err
     );
 }
+
+#[test]
+fn fact_values_as_variadic_arguments() {
+    let mut engine = RuleEngine::new();
+    engine
+        .add_rules_from_str(
+            r#"rule R { when true then x = Fact.Collect("a", 1, 2.5, true, nil); Retract("R"); }"#,
+        )
+        .unwrap();
+    engine
+        .register_typed_method("Collect", |_: &mut Loan, args: Vec<FactValue>| Ok(args))
+        .unwrap();
+    let mut f = facts(&Loan::default());
+    engine.execute(&mut f).unwrap();
+    assert_eq!(
+        f["x"].value,
+        FactValue::Array(vec![
+            FactValue::from("a"),
+            FactValue::Integer(1),
+            FactValue::Float(2.5),
+            FactValue::Boolean(true),
+            FactValue::Null,
+        ])
+    );
+    // Integers stay integers through the round trip
+    assert!(
+        matches!(&f["x"].value, FactValue::Array(items) if matches!(items[1], FactValue::Integer(1)))
+    );
+}

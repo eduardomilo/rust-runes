@@ -25,11 +25,6 @@ pub fn is_reserved(name: &str) -> bool {
     ENGINE_FUNCTIONS.contains(&name) || builtin(name).is_some()
 }
 
-/// Calls a built-in global function. Returns `None` if `name` is not a built-in.
-pub fn call_builtin(name: &str, args: &[FactValue]) -> Option<Result<FactValue, String>> {
-    builtin(name).map(|f| f(name, args))
-}
-
 pub(crate) fn builtin(name: &str) -> Option<Builtin> {
     Some(match name {
         // Working-memory hints. This engine has no working memory to reset, so they

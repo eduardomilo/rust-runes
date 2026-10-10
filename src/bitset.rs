@@ -10,7 +10,7 @@ impl BitSet {
     /// A set over `0..len`, initially containing every value if `full`.
     pub fn new(len: usize, full: bool) -> Self {
         let mut words = vec![if full { u64::MAX } else { 0 }; len.div_ceil(64)];
-        if full && !len.is_multiple_of(64) {
+        if full && len % 64 != 0 {
             *words.last_mut().unwrap() = (1u64 << (len % 64)) - 1;
         }
         BitSet { words, len }

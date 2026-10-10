@@ -1,23 +1,69 @@
+//! A rule engine compatible with [Grule](https://github.com/hyperjumptech/grule-rule-engine)'s
+//! rule language (GRL) and execution model, for embedding business rules in Rust.
+//!
+//! Rules are written in GRL and loaded into a [`RuleEngine`]; facts are named
+//! [`FactValue`]s, typically converted from your own serde types. Executing runs rules
+//! until none apply: each cycle fires the highest-salience rule whose condition holds.
+//!
+//! ```
+//! use rust_runes::{Fact, RuleEngine};
+//! use serde::{Deserialize, Serialize};
+//! use std::collections::HashMap;
+//!
+//! #[derive(Serialize, Deserialize)]
+//! #[allow(non_snake_case)]
+//! struct Ride {
+//!     Distance: i64,
+//!     NetAmount: f64,
+//!     Priced: bool,
+//! }
+//!
+//! let mut engine = RuleEngine::new();
+//! engine.add_rules_from_str(r#"
+//!     rule LongRide "Long rides get a flat rate" salience 10 {
+//!         when Ride.Distance > 5000 && !Ride.Priced
+//!         then Ride.NetAmount = 143.32; Ride.Priced = true;
+//!     }
+//! "#)?;
+//!
+//! let ride = Ride { Distance: 6000, NetAmount: 0.0, Priced: false };
+//! let mut facts = HashMap::from([("Ride".to_string(), Fact::from_serialize("Ride", &ride)?)]);
+//! let result = engine.execute(&mut facts)?;
+//!
+//! let ride: Ride = facts["Ride"].deserialize()?;
+//! assert_eq!(result.rules_fired, ["LongRide"]);
+//! assert_eq!(ride.NetAmount, 143.32);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! See the README for the rule language, built-in functions, and how this differs
+//! from Grule.
+
+#![warn(missing_docs)]
+
+/// Expression trees for rule conditions and actions.
 pub mod ast;
 mod bitset;
 mod compiled;
+/// The rule engine and its execution model.
 pub mod engine;
+/// Fact values and conversion to and from Rust types.
 pub mod facts;
-pub mod functions;
+mod functions;
+/// Storage and loading of rules.
 pub mod knowledge_base;
 mod methods;
-pub mod operators;
+mod operators;
+/// Parsing GRL text into rules.
 pub mod parser;
+/// The rule type.
 pub mod rule;
-pub mod time_functions;
+mod time_functions;
 
 pub use engine::{EngineError, EngineListener, ExecutionResult, RuleEngine, RulePhase};
 pub use facts::{serde_time, Fact, FactValue};
 pub use knowledge_base::KnowledgeBase;
 pub use rule::Rule;
-
-// Re-export main types
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[cfg(test)]
 mod tests {

@@ -1,16 +1,23 @@
-use crate::ast::{Expression, RuleAst};
+use crate::ast::Expression;
 use serde::{Deserialize, Serialize};
 
+/// A rule: when its condition holds, its actions run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
+    /// Unique name, used by `Retract` and in errors.
     pub name: String,
+    /// Optional description.
     pub description: Option<String>,
+    /// Priority: when several rules match, the highest salience fires first.
     pub salience: i32,
+    /// The condition, which must evaluate to a boolean.
     pub when_condition: Expression,
+    /// The actions: assignments and function or method calls.
     pub then_actions: Vec<Expression>,
 }
 
 impl Rule {
+    /// A rule with no description.
     pub fn new(
         name: String,
         salience: i32,
@@ -26,20 +33,9 @@ impl Rule {
         }
     }
 
+    /// Sets the description.
     pub fn with_description(mut self, description: String) -> Self {
         self.description = Some(description);
         self
-    }
-}
-
-impl From<RuleAst> for Rule {
-    fn from(ast: RuleAst) -> Self {
-        Self {
-            name: ast.name,
-            description: ast.description,
-            salience: ast.salience,
-            when_condition: ast.when_condition,
-            then_actions: ast.then_actions,
-        }
     }
 }

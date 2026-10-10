@@ -20,33 +20,48 @@ use thiserror::Error;
 /// Maximum number of rule firings per execution, matching Grule's default.
 pub const DEFAULT_MAX_CYCLES: usize = 5000;
 
+/// Errors from executing rules.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum EngineError {
+    /// An expression couldn't be evaluated, e.g. a missing field.
     #[error("Evaluation error: {0}")]
     EvaluationError(String),
+    /// A rule referred to a fact that doesn't exist.
     #[error("Unknown variable: {0}")]
     UnknownVariable(String),
+    /// An operation was applied to values of the wrong type.
     #[error("Type error: {0}")]
     TypeError(String),
+    /// Integer `%` by zero.
     #[error("Division by zero")]
     DivisionByZero,
+    /// A rule called a function that is neither built in nor registered.
     #[error("Unknown function: {0}")]
     UnknownFunction(String),
+    /// A function or method call failed (wrong arguments, or an error it returned).
     #[error("Function error: {0}")]
     FunctionError(String),
+    /// `Retract` named a rule that doesn't exist.
     #[error("Unknown rule: {0}")]
     UnknownRule(String),
+    /// Rules kept firing past the cycle limit (see `RuleEngine::set_max_cycles`).
     #[error("Rules fired {0} times without settling; a rule's actions may never make its condition false (consider Retract)")]
     MaxCyclesExceeded(usize),
+    /// The execution's cancellation flag was set.
     #[error("Execution was cancelled")]
     Cancelled,
+    /// The execution's timeout elapsed.
     #[error("Execution timed out")]
     TimedOut,
     /// An error raised while evaluating or executing a specific rule.
     #[error("Rule '{rule}' failed in its {phase} scope: {source}")]
     InRule {
+        /// The rule's name.
         rule: String,
+        /// Whether the error came from the rule's condition or its actions.
         phase: RulePhase,
+        /// The underlying error.
         #[source]
         source: Box<EngineError>,
     },
@@ -73,7 +88,9 @@ impl EngineError {
 /// Which part of a rule an error came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RulePhase {
+    /// The rule's condition.
     When,
+    /// The rule's actions.
     Then,
 }
 
@@ -97,18 +114,20 @@ pub trait EngineListener: Send + Sync {
     fn execute_rule(&self, _cycle: u64, _rule: &Rule) {}
 }
 
+/// What an execution did.
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
+    /// The rules that fired, in order (a rule may appear more than once).
     pub rules_fired: Vec<String>,
-    pub facts_modified: Vec<String>,
+    /// How long the execution took, in milliseconds.
     pub execution_time_ms: u128,
 }
 
 impl ExecutionResult {
+    /// An empty result.
     pub fn new() -> Self {
         Self {
             rules_fired: Vec::new(),
-            facts_modified: Vec::new(),
             execution_time_ms: 0,
         }
     }
@@ -186,6 +205,11 @@ enum Key {
     Index(i64),
 }
 
+/// Runs rules against facts, as Grule's engine does.
+///
+/// An engine holds a set of rules (its [`KnowledgeBase`]) plus registered functions,
+/// methods and listeners. [`execute`](Self::execute) takes `&self`, so one engine can be
+/// shared between threads and run concurrently.
 pub struct RuleEngine {
     knowledge_base: KnowledgeBase,
     functions: HashMap<String, Box<Function>>,
@@ -197,6 +221,8 @@ pub struct RuleEngine {
 }
 
 impl RuleEngine {
+    /// An engine with no rules, Grule's default cycle limit (5000), and failed
+    /// conditions counting as false.
     pub fn new() -> Self {
         Self {
             knowledge_base: KnowledgeBase::new(),
@@ -209,6 +235,7 @@ impl RuleEngine {
         }
     }
 
+    /// Adds a rule. Fails if a rule with the same name exists.
     pub fn add_rule(&mut self, rule: Rule) -> Result<(), String> {
         self.knowledge_base.add_rule(rule)
     }
@@ -247,6 +274,8 @@ impl RuleEngine {
         self.condition_caching = enabled;
     }
 
+    /// Adds a listener notified as executions run. With any listener attached, every
+    /// rule is evaluated every cycle (as in Grule) so that listeners see each evaluation.
     pub fn add_listener(&mut self, listener: impl EngineListener + 'static) {
         self.listeners.push(Box::new(listener));
     }
@@ -1013,6 +1042,7 @@ impl RuleEngine {
         }
     }
 
+    /// The engine's rules.
     pub fn get_knowledge_base(&self) -> &KnowledgeBase {
         &self.knowledge_base
     }
