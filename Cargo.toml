@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/eduardomilo/rust-runes"
 readme = "README.md"
 keywords = ["rules", "rule-engine", "grule", "grl", "business-rules"]
-exclude = [".github/", ".vscode/", "CLAUDE.md"]
+exclude = [".github/", "AGENTS.md", "CLAUDE.md"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
