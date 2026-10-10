@@ -58,6 +58,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Fields keep their types as they would in a Go struct: assigning a float to an integer
+field truncates it, and assigning a value of another type (a number to a string field)
+is an error. Maps with integer keys work as in Go (`Fact.Codes[404]`). For `DateTime`
+fields to arrive as times rather than strings, annotate them:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct Order {
+    #[serde(with = "rust_runes::serde_time")]
+    created: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "rust_runes::serde_time::option")]
+    shipped: Option<chrono::DateTime<chrono::Utc>>,
+}
+```
+
 Rules can also be loaded with `add_rules_from_file(path)` or `add_rules_from_str(grl)`, or
 built in code with `Rule::new` and the `ast::Expression` constructors. Loading reports the
 file, line and column of syntax errors, and adds nothing from a file that fails.
@@ -105,6 +120,7 @@ The engine also provides:
 
 - `execute_with_cancel(&mut facts, &AtomicBool)`: stops with `EngineError::Cancelled`
   once the flag is set.
+- `execute_with_timeout(&mut facts, duration)`: stops with `EngineError::TimedOut`.
 - `fetch_matching_rules(&facts)`: the rules whose conditions hold, highest salience
   first, without running anything.
 - `add_listener(listener)`: an `EngineListener` is notified as each cycle begins, as each
@@ -121,7 +137,8 @@ rule Name "optional description" salience 10 {
 
 Keywords are case-insensitive, and identifiers may use Unicode letters.
 
-**Values.** Strings (`"..."` or `'...'`, with `\` escapes and doubled quotes), integers
+**Values.** Strings (`"..."` or `'...'`, with Go's escapes: `\n`, `\t`, `\"`, `\x41`,
+`\101`, `\u00e9`, `\U0001F600`, ...), integers
 (`42`, `0x2A`, `052`), floats (`1.5`, `.5`, `1e3`, `0x1p-2`), booleans, `nil`, and times
 (from `Now()`, `MakeTime(...)` or facts). Facts may also hold objects and arrays.
 
@@ -140,7 +157,10 @@ Keywords are case-insensitive, and identifiers may use Unicode letters.
 Arithmetic on two integers produces an integer; mixing in a float produces a float.
 
 **Statements** are assignments (`=`, `+=`, `-=`, `*=`, `/=`) to variables, fields or
-elements (`order.lines[0].price *= 2;`), or function and method calls.
+elements (`order.lines[0].price *= 2;`), or function and method calls. A field or
+element that already holds a value keeps its type: numbers convert (a float assigned
+to an integer is truncated) and other mismatches are errors, as with Go struct fields.
+`nil` can be assigned to anything.
 
 **Comments** use `//` and `/* */`.
 
@@ -194,9 +214,14 @@ statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
 - There is no knowledge library with named, versioned knowledge bases; an engine holds
   one set of rules. Rules load from GRL text and files (not Grule's JSON rule format,
   URLs or bundles).
-- Facts are dynamic values rather than Go structs. Unsigned integers above `i64::MAX`
+- Facts are dynamic values rather than Go structs. Assigning to a field that doesn't
+  exist yet creates it (Grule reports an error), unsigned integers above `i64::MAX`
   become floats, and `Float64bits` returns its 64 bits as a signed integer.
-- `nil` can be compared with `==` against any value (it equals only `nil`).
+- `nil` can be compared with `==` against any value (it equals only `nil`), and
+  assigned to any field.
+- A doubled quote inside a string (`"say ""hi"""`) stands for one quote; Grule's
+  lexer accepts it but then rejects the string.
+- A rule's `then` block may be empty, and unary `-` applies to any expression.
 
 ## Benchmarks
 

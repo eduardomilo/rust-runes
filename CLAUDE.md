@@ -48,7 +48,7 @@ When in doubt about semantics, Grule's source is the reference (`antlr/grulev3.g
 
 5. **Rules (`rule.rs`)**: Name, optional description, salience, `when` condition and `then` actions.
 
-6. **Facts (`facts.rs`)**: `FactValue` is string, integer, float, boolean, time, object, array or nil. Integers and floats compare equal by value. `Fact::from_serialize` / `deserialize` convert to and from Rust types via serde.
+6. **Facts (`facts.rs`)**: `FactValue` is string, integer, float, boolean, time, object, array or nil. Integers and floats compare equal by value. `Fact::from_serialize` / `deserialize` convert to and from Rust types via serde; `serde_time` lets `DateTime` fields become time values (via a marker string that only exists during conversion). Assignments to existing fields/elements go through `operators::coerce_assignment` (Grule's `SetAttributeValue` rules).
 
 7. **AST (`ast.rs`)**: Expressions, including calls, method calls, indexing and assignments (whose targets are `Variable`/`FieldAccess`/`Index` chains).
 
