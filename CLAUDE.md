@@ -34,7 +34,9 @@ cargo fmt
 
 The project implements a rule engine with the following components:
 
-1. **Rule Engine (`engine.rs`)**: The core component that evaluates rules against facts and executes actions. Uses salience (priority) to determine rule execution order.
+1. **Rule Engine (`engine.rs`)**: The core component that evaluates rules against facts and executes actions. Like Grule, it forward-chains: each cycle fires the highest-salience rule whose condition holds, until none do (`Retract` removes a rule; `max_cycles` guards against loops).
+
+   **Functions (`functions.rs`)**: Built-in functions (`Max`, `Now`, ...) and methods (`s.ToUpper()`, `a.Len()`, ...). Users can add functions with `RuleEngine::register_function`. `Retract` is handled by the engine itself.
 
 2. **Knowledge Base (`knowledge_base.rs`)**: Stores and manages rules. Provides lookup by name and sorting by salience.
 
@@ -58,7 +60,7 @@ The project implements a rule engine with the following components:
    - Logical operations
    - Assignments
 
-6. **Parser (`parser.rs`)**: Parses rule definitions from GRL (Grule Rule Language) text into executable Rule objects.
+6. **Parser (`parser.rs`, `grl.pest`)**: Parses rule definitions from GRL (Grule Rule Language) text into executable Rule objects, using a pest grammar and a Pratt parser for operator precedence.
 
 ## Usage Example
 

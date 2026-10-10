@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod engine;
 pub mod facts;
+pub mod functions;
 pub mod knowledge_base;
 pub mod parser;
 pub mod rule;
@@ -32,7 +33,10 @@ mod tests {
                 Box::new(Expression::Variable("x".to_string())),
                 Box::new(Expression::Number(5.0)),
             ),
-            vec![Expression::assign(&["y"], Expression::Number(10.0))],
+            vec![
+                Expression::assign(&["y"], Expression::Number(10.0)),
+                Expression::call("Retract", vec![Expression::String("test_rule".to_string())]),
+            ],
         );
 
         engine.add_rule(rule).unwrap();
@@ -118,17 +122,10 @@ mod tests {
         }
 
         // Test the action (y = 20)
-        assert_eq!(rule.then_actions.len(), 1);
-        match &rule.then_actions[0] {
-            Expression::Assign(path, val) => {
-                assert_eq!(*path, ["y"]);
-                match &**val {
-                    Expression::Number(n) => assert_eq!(*n, 20.0),
-                    _ => panic!("Expected Number expression for action value"),
-                }
-            }
-            _ => panic!("Expected Assign expression for action"),
-        }
+        assert_eq!(
+            rule.then_actions,
+            vec![Expression::assign(&["y"], Expression::Number(20.0))]
+        );
     }
 
     #[test]
@@ -187,17 +184,13 @@ mod tests {
         }
 
         // Test the action (message = "Confirmed eligible")
-        assert_eq!(rule.then_actions.len(), 1);
-        match &rule.then_actions[0] {
-            Expression::Assign(path, val) => {
-                assert_eq!(*path, ["message"]);
-                match &**val {
-                    Expression::String(s) => assert_eq!(s, "Confirmed eligible"),
-                    _ => panic!("Expected String expression for message value"),
-                }
-            }
-            _ => panic!("Expected Assign expression for action"),
-        }
+        assert_eq!(
+            rule.then_actions,
+            vec![Expression::assign(
+                &["message"],
+                Expression::String("Confirmed eligible".to_string()),
+            )]
+        );
 
         // Also test our programmatically created rule structure
         assert_eq!(rule_age.name, "AgeRule");
@@ -220,33 +213,16 @@ mod tests {
         }
 
         // Test the actions (customer.eligible = true; message = "Customer is eligible for premium service")
-        assert_eq!(rule_age.then_actions.len(), 2);
-
-        // First action (customer.eligible = true)
-        match &rule_age.then_actions[0] {
-            Expression::Assign(path, val) => {
-                assert_eq!(*path, ["customer", "eligible"]);
-                match &**val {
-                    Expression::Boolean(b) => assert!(b),
-                    _ => panic!("Expected Boolean expression for eligible value"),
-                }
-            }
-            _ => panic!("Expected Assign expression for first action"),
-        }
-
-        // Second action (message = "Customer is eligible for premium service")
-        match &rule_age.then_actions[1] {
-            Expression::Assign(path, val) => {
-                assert_eq!(*path, ["message"]);
-                match &**val {
-                    Expression::String(s) => {
-                        assert_eq!(s, "Customer is eligible for premium service")
-                    }
-                    _ => panic!("Expected String expression for message value"),
-                }
-            }
-            _ => panic!("Expected Assign expression for second action"),
-        }
+        assert_eq!(
+            rule_age.then_actions,
+            vec![
+                Expression::assign(&["customer", "eligible"], Expression::Boolean(true)),
+                Expression::assign(
+                    &["message"],
+                    Expression::String("Customer is eligible for premium service".to_string()),
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -267,22 +243,15 @@ mod tests {
         assert_eq!(rule.name, "ArithmeticRule");
 
         // Test the action (y = x + 10)
-        assert_eq!(rule.then_actions.len(), 1);
-        match &rule.then_actions[0] {
-            Expression::Assign(path, val) => {
-                assert_eq!(*path, ["y"]);
-                match &**val {
-                    Expression::Add(left, right) => match (&**left, &**right) {
-                        (Expression::Variable(var), Expression::Number(n)) => {
-                            assert_eq!(var, "x");
-                            assert_eq!(*n, 10.0);
-                        }
-                        _ => panic!("Unexpected expression structure in arithmetic operation"),
-                    },
-                    _ => panic!("Expected Add expression for action value"),
-                }
-            }
-            _ => panic!("Expected Assign expression for action"),
-        }
+        assert_eq!(
+            rule.then_actions,
+            vec![Expression::assign(
+                &["y"],
+                Expression::Add(
+                    Box::new(Expression::Variable("x".to_string())),
+                    Box::new(Expression::Number(10.0)),
+                ),
+            )]
+        );
     }
 }

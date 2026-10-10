@@ -31,7 +31,10 @@ impl GrlParser {
                 | Op::infix(GrammarRule::ge, Assoc::Left))
             .op(Op::infix(GrammarRule::add, Assoc::Left) | Op::infix(GrammarRule::sub, Assoc::Left))
             .op(Op::infix(GrammarRule::mul, Assoc::Left) | Op::infix(GrammarRule::div, Assoc::Left))
-            .op(Op::prefix(GrammarRule::not) | Op::prefix(GrammarRule::neg));
+            .op(Op::prefix(GrammarRule::not) | Op::prefix(GrammarRule::neg))
+            .op(Op::postfix(GrammarRule::method)
+                | Op::postfix(GrammarRule::field)
+                | Op::postfix(GrammarRule::index));
 
         Self { pratt }
     }
@@ -92,29 +95,50 @@ impl GrlParser {
     }
 
     fn parse_action(&self, pair: Pair<GrammarRule>) -> std::result::Result<Expression, String> {
+        let (line, col) = pair.line_col();
         let mut parts = pair.into_inner();
-        let target = parts.next().unwrap();
-        let op = parts.next().unwrap().as_str();
+        let target_pair = parts.next().unwrap();
+        let target_text = target_pair.as_str().trim_end().to_string();
+        let target = self.parse_expr(target_pair.into_inner())?;
+
+        let Some(op) = parts.next() else {
+            return match target {
+                Expression::Call(..) | Expression::MethodCall(..) => Ok(target),
+                _ => Err(format!(
+                    "{}:{}: expected an assignment or function call, found `{}`",
+                    line, col, target_text
+                )),
+            };
+        };
+        if !target.is_assignable() {
+            return Err(format!(
+                "{}:{}: cannot assign to `{}`",
+                line, col, target_text
+            ));
+        }
+
         let mut value = self.parse_expr(parts.next().unwrap().into_inner())?;
 
         // Desugar compound assignment: `x += e` becomes `x = x + e`
-        if op != "=" {
-            let current = Box::new(parse_path(target.clone()));
+        if op.as_str() != "=" {
+            let current = Box::new(target.clone());
             let rhs = Box::new(value);
-            value = match op {
+            value = match op.as_str() {
                 "+=" => Expression::Add(current, rhs),
                 "-=" => Expression::Subtract(current, rhs),
                 "*=" => Expression::Multiply(current, rhs),
                 "/=" => Expression::Divide(current, rhs),
-                _ => unreachable!("unknown assignment operator {}", op),
+                other => unreachable!("unknown assignment operator {}", other),
             };
         }
 
-        let path = target
-            .into_inner()
-            .map(|p| p.as_str().to_string())
-            .collect();
-        Ok(Expression::Assign(path, Box::new(value)))
+        Ok(Expression::Assign(Box::new(target), Box::new(value)))
+    }
+
+    fn parse_args(&self, pair: Pair<GrammarRule>) -> std::result::Result<Vec<Expression>, String> {
+        pair.into_inner()
+            .map(|arg| self.parse_expr(arg.into_inner()))
+            .collect()
     }
 
     fn parse_expr(&self, pairs: Pairs<GrammarRule>) -> std::result::Result<Expression, String> {
@@ -126,8 +150,19 @@ impl GrlParser {
                     .map(Expression::Number)
                     .map_err(|_| format!("Invalid number: {}", primary.as_str())),
                 GrammarRule::string => parse_string(primary).map(Expression::String),
-                GrammarRule::boolean => Ok(Expression::Boolean(primary.as_str() == "true")),
-                GrammarRule::path => Ok(parse_path(primary)),
+                GrammarRule::boolean => Ok(Expression::Boolean(
+                    primary.as_str().eq_ignore_ascii_case("true"),
+                )),
+                GrammarRule::nil => Ok(Expression::Nil),
+                GrammarRule::ident => Ok(Expression::Variable(primary.as_str().to_string())),
+                GrammarRule::call => {
+                    let mut inner = primary.into_inner();
+                    let name = inner.next().unwrap().as_str().to_string();
+                    Ok(Expression::Call(
+                        name,
+                        self.parse_args(inner.next().unwrap())?,
+                    ))
+                }
                 GrammarRule::expr => self.parse_expr(primary.into_inner()),
                 rule => unreachable!("unexpected primary {:?}", rule),
             })
@@ -162,16 +197,26 @@ impl GrlParser {
                     rule => unreachable!("unexpected infix {:?}", rule),
                 })
             })
+            .map_postfix(|lhs, op| {
+                let lhs = Box::new(lhs?);
+                let mut inner = op.clone().into_inner();
+                Ok(match op.as_rule() {
+                    GrammarRule::field => {
+                        Expression::FieldAccess(lhs, inner.next().unwrap().as_str().to_string())
+                    }
+                    GrammarRule::index => Expression::Index(
+                        lhs,
+                        Box::new(self.parse_expr(inner.next().unwrap().into_inner())?),
+                    ),
+                    GrammarRule::method => {
+                        let name = inner.next().unwrap().as_str().to_string();
+                        Expression::MethodCall(lhs, name, self.parse_args(inner.next().unwrap())?)
+                    }
+                    rule => unreachable!("unexpected postfix {:?}", rule),
+                })
+            })
             .parse(pairs)
     }
-}
-
-fn parse_path(pair: Pair<GrammarRule>) -> Expression {
-    let mut segments = pair.into_inner().map(|p| p.as_str().to_string());
-    let root = Expression::Variable(segments.next().unwrap());
-    segments.fold(root, |obj, field| {
-        Expression::FieldAccess(Box::new(obj), field)
-    })
 }
 
 fn parse_string(pair: Pair<GrammarRule>) -> std::result::Result<String, String> {
@@ -433,6 +478,7 @@ mod tests {
                 then
                     customer.eligible = true;
                     message = "Customer is eligible for premium service";
+                    Retract("CheckEligibility");
             }
         "#;
         let mut engine = RuleEngine::new();

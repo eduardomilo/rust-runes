@@ -41,7 +41,11 @@ fn main() -> Result<()> {
             Box::new(ast::Expression::Variable("x".to_string())),
             Box::new(ast::Expression::Number(5.0)),
         ),
-        vec![ast::Expression::assign(&["y"], ast::Expression::Number(10.0))],
+        vec![
+            ast::Expression::assign(&["y"], ast::Expression::Number(10.0)),
+            // Without this the rule would keep firing, since x > 5 stays true
+            ast::Expression::call("Retract", vec![ast::Expression::String("example_rule".to_string())]),
+        ],
     );
     
     engine.add_rule(rule)?;
@@ -81,6 +85,7 @@ fn main() -> Result<()> {
             then
                 customer.eligible = true;
                 message = "Customer is eligible for premium service";
+                Retract("CheckEligibility");
         }
     "#;
 
@@ -103,12 +108,69 @@ The GRL grammar (`src/grl.pest`) supports:
 - Standard operator precedence (`*` `/` over `+` `-` over comparisons over `&&` over `||`) and parentheses
 - Unary `!` and `-`
 - Nested field access and assignment (`order.customer.age += 1;`)
+- Indexing into arrays and objects (`order.lines[0].price`, `tags["vip"] = true;`)
+- Function and method calls (`Max(a, b)`, `name.Trim().ToLower()`), also usable as statements
+- The `nil` literal
 - Compound assignment in actions (`+=`, `-=`, `*=`, `/=`)
 - String escapes (`\"`, `\\`, `\n`, `\t`, `\r`)
 - `//` and `/* */` comments
 - Negative salience
 
 Syntax errors report the line and column where parsing failed.
+
+## Execution Model
+
+Like Grule, the engine runs rules until nothing more applies. Each cycle it fires the
+highest-salience rule whose condition is true (ties go to the rule added first), then
+re-evaluates every condition against the updated facts. Execution ends when no
+condition holds.
+
+A rule whose actions never make its own condition false would fire forever. End it
+with `Retract("RuleName")`, which removes a rule for the rest of the execution, or
+add a guard to the condition. As a safety net, execution fails with
+`EngineError::MaxCyclesExceeded` after 5000 firings (`engine.set_max_cycles(n)`
+changes the limit).
+
+`&&` and `||` short-circuit, so `x != 0 && 10 / x > 1` is safe when `x` is 0.
+
+## Functions
+
+Built-in functions:
+
+| Function | Description |
+|---|---|
+| `Retract("Rule")` | Stop a rule from firing again in this execution (statement only) |
+| `Now()` | Current Unix time in seconds |
+| `Abs(x)`, `Ceil(x)`, `Floor(x)`, `Sqrt(x)`, `Pow(x, y)` | Math |
+| `Max(a, b, ...)`, `Min(a, b, ...)` | Largest / smallest of the arguments |
+| `IsNil(x)` | Whether `x` is `nil` |
+
+Built-in methods:
+
+| Type | Methods |
+|---|---|
+| string | `Len()`, `ToUpper()`, `ToLower()`, `Trim()`, `Contains(s)`, `HasPrefix(s)`, `HasSuffix(s)`, `Index(s)`, `LastIndex(s)` |
+| array | `Len()`, `Contains(x)` |
+| object | `Len()` |
+
+You can register your own functions:
+
+```rust
+engine.register_function("Percent", |args| match args {
+    [FactValue::Number(n), FactValue::Number(p)] => Ok(FactValue::Number(n * p / 100.0)),
+    _ => Err("expected two numbers".to_string()),
+})?;
+// GRL: then order.discount = Percent(order.total, 10);
+```
+
+## Benchmarks
+
+`cargo bench` runs criterion benchmarks (`benches/grule_comparison.rs`) that mirror
+Grule's own: loading 100 and 1000 rules, and executing a fact against them, using the same
+rule set as Grule's `examples/benchmark/*.grl`. An extra `execute/no_match` case runs a
+fact that matches no rule, so every condition is evaluated. That makes it the fairer
+comparison with Grule's execution numbers, because Grule evaluates every rule each cycle
+while this engine stops at the first match.
 
 ## Core Components
 

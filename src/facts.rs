@@ -40,6 +40,17 @@ impl FactValue {
         }
     }
 
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            FactValue::String(_) => "string",
+            FactValue::Number(_) => "number",
+            FactValue::Boolean(_) => "boolean",
+            FactValue::Object(_) => "object",
+            FactValue::Array(_) => "array",
+            FactValue::Null => "nil",
+        }
+    }
+
     pub fn is_truthy(&self) -> bool {
         match self {
             FactValue::Boolean(b) => *b,
