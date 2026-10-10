@@ -2,7 +2,7 @@
 name = "rust-runes"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.83"
 description = "A rule engine compatible with Grule's rule language (GRL) and execution model"
 license = "MIT"
 repository = "https://github.com/eduardomilo/rust-runes"

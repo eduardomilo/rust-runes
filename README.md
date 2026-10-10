@@ -15,7 +15,7 @@ This is an independent implementation; it is not affiliated with the Grule proje
 rust-runes = "0.1.0"
 ```
 
-Requires Rust 1.82 or later.
+Requires Rust 1.83 or later.
 
 ## Quick Start
 
@@ -259,10 +259,29 @@ statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
 ## Benchmarks
 
 `cargo bench` runs criterion benchmarks (`benches/grule_comparison.rs`) that mirror
-Grule's own: loading 100 and 1000 rules, and executing a fact against them, using the same
-rule set as Grule's `examples/benchmark/*.grl`. An extra `execute/no_match` case runs a
-fact that matches no rule, and `chain` measures a run of many cycles with condition
-caching on and off.
+Grule's own, using the same rule set as Grule's `examples/benchmark/*.grl`: 100 or 1000
+identical rules plus one with higher salience, which matches and calls `Complete()`.
+
+| Benchmark | 100 rules | 1000 rules | Grule (published) |
+|---|---|---|---|
+| Load rules (parse and compile) | 2.8 ms | 28.7 ms | 21–99 ms / 210–934 ms |
+| Execute a fact (Grule's benchmark) | 0.81 µs | 0.82 µs | 9.7 µs / 569 µs |
+| Execute a fact that matches no rule | 2.2 µs | 16.8 µs | |
+| Chain of N cycles, each enabling the next rule | 68 µs | 0.72 ms | |
+| Same chain, condition caching off | 0.84 ms | 87 ms | |
+
+Measured on an Apple M5. Grule's figures come from its own benchmark documentation, on
+different hardware and across several runs, so compare orders of magnitude rather than
+exact ratios.
+
+Where the difference comes from:
+
+- **Executing** stays nearly flat as rules grow: identical sub-expressions across rules
+  are evaluated once, rule results are reused until a fact they read changes, and lower
+  rules aren't evaluated once the cycle's best match is found.
+- **Chains** grow linearly with caching on, because each cycle only re-evaluates the rules
+  whose inputs changed; with it off, every cycle re-evaluates every rule.
+- **Loading** is a parse into compiled rules; Grule also builds its RETE network.
 
 ## Contributing
 

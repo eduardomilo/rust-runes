@@ -39,7 +39,7 @@ Please report security vulnerabilities privately; see [SECURITY.md](SECURITY.md)
   runs random rule sets with the optimizations on and off. Run it after touching
   `engine.rs`, `compiled.rs` or `knowledge_base.rs`.
 - **Document public items.** The crate has `#![warn(missing_docs)]`.
-- **Minimum Rust version is 1.82** (`rust-version` in `Cargo.toml`); avoid newer standard
+- **Minimum Rust version is 1.83** (`rust-version` in `Cargo.toml`); avoid newer standard
   library APIs in the library. CI checks this.
 - **Performance changes** should come with `cargo bench` numbers (before and after).
 
