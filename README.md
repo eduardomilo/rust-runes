@@ -264,6 +264,11 @@ rule set as Grule's `examples/benchmark/*.grl`. An extra `execute/no_match` case
 fact that matches no rule, and `chain` measures a run of many cycles with condition
 caching on and off.
 
+## Contributing
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Please report
+security issues privately, as described in [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT

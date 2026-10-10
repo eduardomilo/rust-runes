@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest a new feature or a missing piece of Grule compatibility
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem or use case, not just the proposed solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How you'd like it to work, e.g. the GRL or Rust API you have in mind.
+  - type: textarea
+    id: grule
+    attributes:
+      label: Grule behavior
+      description: If Grule already supports this, how does it work there?

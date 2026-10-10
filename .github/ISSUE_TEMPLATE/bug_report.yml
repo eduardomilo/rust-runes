@@ -1,0 +1,31 @@
+name: Bug report
+description: Something doesn't work, or behaves differently than in Grule
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead (include error messages).
+    validations:
+      required: true
+  - type: textarea
+    id: rules
+    attributes:
+      label: Rules and facts
+      description: The GRL rules and fact values (or Rust code) that reproduce the problem.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: grule
+    attributes:
+      label: Grule comparison
+      description: If this is a difference from Grule, which Grule version behaves differently?
+  - type: input
+    id: version
+    attributes:
+      label: rust-runes version
+      placeholder: "0.1.0"
+    validations:
+      required: true
