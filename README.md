@@ -41,10 +41,7 @@ fn main() -> Result<()> {
             Box::new(ast::Expression::Variable("x".to_string())),
             Box::new(ast::Expression::Number(5.0)),
         ),
-        vec![ast::Expression::Assignment(
-            "y".to_string(),
-            Box::new(ast::Expression::Number(10.0)),
-        )],
+        vec![ast::Expression::assign(&["y"], ast::Expression::Number(10.0))],
     );
     
     engine.add_rule(rule)?;
@@ -99,6 +96,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 ```
+
+To load a file containing several rules, use `parser.parse_rules(grl_text)`, which returns a `Vec<Rule>`.
+
+The GRL grammar (`src/grl.pest`) supports:
+- Standard operator precedence (`*` `/` over `+` `-` over comparisons over `&&` over `||`) and parentheses
+- Unary `!` and `-`
+- Nested field access and assignment (`order.customer.age += 1;`)
+- Compound assignment in actions (`+=`, `-=`, `*=`, `/=`)
+- String escapes (`\"`, `\\`, `\n`, `\t`, `\r`)
+- `//` and `/* */` comments
+- Negative salience
+
+Syntax errors report the line and column where parsing failed.
 
 ## Core Components
 

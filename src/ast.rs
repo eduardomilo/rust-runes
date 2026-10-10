@@ -31,9 +31,18 @@ pub enum Expression {
     Or(Box<Expression>, Box<Expression>),
     Not(Box<Expression>),
 
-    // Assignment
-    Assignment(String, Box<Expression>),
-    FieldAssignment(String, String, Box<Expression>),
+    // Assignment to a variable or a (possibly nested) field: `["order", "customer", "age"]`
+    Assign(Vec<String>, Box<Expression>),
+}
+
+impl Expression {
+    /// Builds an assignment to `path`, e.g. `Expression::assign(&["car", "Speed"], value)`.
+    pub fn assign(path: &[&str], value: Expression) -> Self {
+        Expression::Assign(
+            path.iter().map(|s| s.to_string()).collect(),
+            Box::new(value),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -1,0 +1,55 @@
+// Grammar for GRL (Grule Rule Language)
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ ("//" ~ (!"\n" ~ ANY)*) | ("/*" ~ (!"*/" ~ ANY)* ~ "*/") }
+
+// Entry points
+grl         = { SOI ~ rule_def* ~ EOI }
+
+rule_def    = { kw_rule ~ ident ~ description? ~ salience? ~ "{" ~ kw_when ~ expr ~ kw_then ~ action* ~ "}" }
+description = { string }
+salience    = { kw_salience ~ int }
+
+// Actions
+action    = { path ~ assign_op ~ expr ~ ";" }
+assign_op = { "+=" | "-=" | "*=" | "/=" | "=" }
+
+// Expressions: operator precedence is resolved by the Pratt parser in parser.rs
+expr    = { prefix* ~ primary ~ (infix ~ prefix* ~ primary)* }
+primary = _{ number | string | boolean | path | "(" ~ expr ~ ")" }
+
+infix = _{ or | and | eq | ne | le | ge | lt | gt | add | sub | mul | div }
+or    = { "||" }
+and   = { "&&" }
+eq    = { "==" }
+ne    = { "!=" }
+le    = { "<=" }
+ge    = { ">=" }
+lt    = { "<" }
+gt    = { ">" }
+add   = { "+" }
+sub   = { "-" }
+mul   = { "*" }
+div   = { "/" }
+
+prefix = _{ not | neg }
+not    = { "!" }
+neg    = { "-" }
+
+// Literals
+number  = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+int     = @{ "-"? ~ ASCII_DIGIT+ }
+boolean = @{ ("true" | "false") ~ !ident_char }
+string  = ${ "\"" ~ string_inner ~ "\"" }
+string_inner = @{ (("\\" ~ ANY) | (!("\"" | "\\") ~ ANY))* }
+
+// Identifiers
+path       = ${ ident ~ ("." ~ ident)* }
+ident      = @{ !keyword ~ (ASCII_ALPHA | "_") ~ ident_char* }
+ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+
+keyword     = @{ ("rule" | "when" | "then" | "salience" | "true" | "false") ~ !ident_char }
+kw_rule     = @{ "rule" ~ !ident_char }
+kw_when     = @{ "when" ~ !ident_char }
+kw_then     = @{ "then" ~ !ident_char }
+kw_salience = @{ "salience" ~ !ident_char }

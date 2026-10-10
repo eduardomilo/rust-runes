@@ -32,10 +32,7 @@ mod tests {
                 Box::new(Expression::Variable("x".to_string())),
                 Box::new(Expression::Number(5.0)),
             ),
-            vec![Expression::Assignment(
-                "y".to_string(),
-                Box::new(Expression::Number(10.0)),
-            )],
+            vec![Expression::assign(&["y"], Expression::Number(10.0))],
         );
 
         engine.add_rule(rule).unwrap();
@@ -123,14 +120,14 @@ mod tests {
         // Test the action (y = 20)
         assert_eq!(rule.then_actions.len(), 1);
         match &rule.then_actions[0] {
-            Expression::Assignment(var, val) => {
-                assert_eq!(var, "y");
+            Expression::Assign(path, val) => {
+                assert_eq!(*path, ["y"]);
                 match &**val {
                     Expression::Number(n) => assert_eq!(*n, 20.0),
                     _ => panic!("Expected Number expression for action value"),
                 }
             }
-            _ => panic!("Expected Assignment expression for action"),
+            _ => panic!("Expected Assign expression for action"),
         }
     }
 
@@ -138,7 +135,6 @@ mod tests {
     fn test_grl_parser_complex_rule() {
         let parser = parser::GrlParser::new();
 
-        // Testing with separate age condition without the problematic && operator
         let rule_age = Rule::new(
             "AgeRule".to_string(),
             10,
@@ -150,16 +146,10 @@ mod tests {
                 Box::new(Expression::Number(18.0)),
             ),
             vec![
-                Expression::FieldAssignment(
-                    "customer".to_string(),
-                    "eligible".to_string(),
-                    Box::new(Expression::Boolean(true)),
-                ),
-                Expression::Assignment(
-                    "message".to_string(),
-                    Box::new(Expression::String(
-                        "Customer is eligible for premium service".to_string(),
-                    )),
+                Expression::assign(&["customer", "eligible"], Expression::Boolean(true)),
+                Expression::assign(
+                    &["message"],
+                    Expression::String("Customer is eligible for premium service".to_string()),
                 ),
             ],
         );
@@ -199,14 +189,14 @@ mod tests {
         // Test the action (message = "Confirmed eligible")
         assert_eq!(rule.then_actions.len(), 1);
         match &rule.then_actions[0] {
-            Expression::Assignment(var, val) => {
-                assert_eq!(var, "message");
+            Expression::Assign(path, val) => {
+                assert_eq!(*path, ["message"]);
                 match &**val {
                     Expression::String(s) => assert_eq!(s, "Confirmed eligible"),
                     _ => panic!("Expected String expression for message value"),
                 }
             }
-            _ => panic!("Expected Assignment expression for action"),
+            _ => panic!("Expected Assign expression for action"),
         }
 
         // Also test our programmatically created rule structure
@@ -234,21 +224,20 @@ mod tests {
 
         // First action (customer.eligible = true)
         match &rule_age.then_actions[0] {
-            Expression::FieldAssignment(obj_name, field_name, val) => {
-                assert_eq!(obj_name, "customer");
-                assert_eq!(field_name, "eligible");
+            Expression::Assign(path, val) => {
+                assert_eq!(*path, ["customer", "eligible"]);
                 match &**val {
                     Expression::Boolean(b) => assert!(b),
                     _ => panic!("Expected Boolean expression for eligible value"),
                 }
             }
-            _ => panic!("Expected FieldAssignment expression for first action"),
+            _ => panic!("Expected Assign expression for first action"),
         }
 
         // Second action (message = "Customer is eligible for premium service")
         match &rule_age.then_actions[1] {
-            Expression::Assignment(var, val) => {
-                assert_eq!(var, "message");
+            Expression::Assign(path, val) => {
+                assert_eq!(*path, ["message"]);
                 match &**val {
                     Expression::String(s) => {
                         assert_eq!(s, "Customer is eligible for premium service")
@@ -256,7 +245,7 @@ mod tests {
                     _ => panic!("Expected String expression for message value"),
                 }
             }
-            _ => panic!("Expected Assignment expression for second action"),
+            _ => panic!("Expected Assign expression for second action"),
         }
     }
 
@@ -280,8 +269,8 @@ mod tests {
         // Test the action (y = x + 10)
         assert_eq!(rule.then_actions.len(), 1);
         match &rule.then_actions[0] {
-            Expression::Assignment(var, val) => {
-                assert_eq!(var, "y");
+            Expression::Assign(path, val) => {
+                assert_eq!(*path, ["y"]);
                 match &**val {
                     Expression::Add(left, right) => match (&**left, &**right) {
                         (Expression::Variable(var), Expression::Number(n)) => {
@@ -293,7 +282,7 @@ mod tests {
                     _ => panic!("Expected Add expression for action value"),
                 }
             }
-            _ => panic!("Expected Assignment expression for action"),
+            _ => panic!("Expected Assign expression for action"),
         }
     }
 }

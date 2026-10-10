@@ -30,10 +30,9 @@ fn main() -> Result<()> {
             )),
         ),
         vec![
-            ast::Expression::FieldAssignment(
-                "TestCar".to_string(),
-                "Speed".to_string(),
-                Box::new(ast::Expression::Add(
+            ast::Expression::assign(
+                &["TestCar", "Speed"],
+                ast::Expression::Add(
                     Box::new(ast::Expression::FieldAccess(
                         Box::new(ast::Expression::Variable("TestCar".to_string())),
                         "Speed".to_string(),
@@ -42,12 +41,11 @@ fn main() -> Result<()> {
                         Box::new(ast::Expression::Variable("TestCar".to_string())),
                         "SpeedIncrement".to_string(),
                     )),
-                )),
+                ),
             ),
-            ast::Expression::FieldAssignment(
-                "DistanceRecord".to_string(),
-                "TotalDistance".to_string(),
-                Box::new(ast::Expression::Add(
+            ast::Expression::assign(
+                &["DistanceRecord", "TotalDistance"],
+                ast::Expression::Add(
                     Box::new(ast::Expression::FieldAccess(
                         Box::new(ast::Expression::Variable("DistanceRecord".to_string())),
                         "TotalDistance".to_string(),
@@ -56,7 +54,7 @@ fn main() -> Result<()> {
                         Box::new(ast::Expression::Variable("TestCar".to_string())),
                         "Speed".to_string(),
                     )),
-                )),
+                ),
             ),
         ],
     )

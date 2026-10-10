@@ -1,202 +1,467 @@
 use crate::ast::Expression;
 use crate::rule::Rule;
-use regex::Regex;
+use pest::iterators::{Pair, Pairs};
+use pest::pratt_parser::{Assoc, Op, PrattParser};
+use pest::Parser;
+
+// Kept in its own module because the derive generates an enum named `Rule`,
+// which would clash with `crate::rule::Rule`.
+mod grammar {
+    #[derive(pest_derive::Parser)]
+    #[grammar = "grl.pest"]
+    pub struct GrlGrammar;
+}
+
+use grammar::{GrlGrammar, Rule as GrammarRule};
 
 pub struct GrlParser {
-    rule_pattern: Regex,
-    condition_pattern: Regex,
+    pratt: PrattParser<GrammarRule>,
 }
 
 impl GrlParser {
     pub fn new() -> Self {
-        // Simple regex patterns for basic GRL parsing
-        // In a production system, you'd want a proper parser generator
-        let rule_pattern = Regex::new(
-            r#"rule\s+(\w+)\s*(?:"([^"]*)")?\s*(?:salience\s+(\d+))?\s*\{\s*when\s+(.*?)\s+then\s+(.*?)\s*\}"#
-        ).unwrap();
+        // Lowest precedence first
+        let pratt = PrattParser::new()
+            .op(Op::infix(GrammarRule::or, Assoc::Left))
+            .op(Op::infix(GrammarRule::and, Assoc::Left))
+            .op(Op::infix(GrammarRule::eq, Assoc::Left) | Op::infix(GrammarRule::ne, Assoc::Left))
+            .op(Op::infix(GrammarRule::lt, Assoc::Left)
+                | Op::infix(GrammarRule::le, Assoc::Left)
+                | Op::infix(GrammarRule::gt, Assoc::Left)
+                | Op::infix(GrammarRule::ge, Assoc::Left))
+            .op(Op::infix(GrammarRule::add, Assoc::Left) | Op::infix(GrammarRule::sub, Assoc::Left))
+            .op(Op::infix(GrammarRule::mul, Assoc::Left) | Op::infix(GrammarRule::div, Assoc::Left))
+            .op(Op::prefix(GrammarRule::not) | Op::prefix(GrammarRule::neg));
 
-        let condition_pattern =
-            Regex::new(r#"(\w+(?:\.\w+)*)\s*(==|!=|<|<=|>|>=)\s*(.+?)(?:\s+&&|\s+\|\||$)"#)
-                .unwrap();
-
-        Self {
-            rule_pattern,
-            condition_pattern,
-        }
+        Self { pratt }
     }
 
+    /// Parses text containing exactly one rule.
     pub fn parse_rule(&self, grl_text: &str) -> std::result::Result<Rule, String> {
-        let normalized = grl_text.replace('\n', " ").replace('\r', "");
-
-        if let Some(captures) = self.rule_pattern.captures(&normalized) {
-            let name = captures.get(1).unwrap().as_str().to_string();
-            let description = captures.get(2).map(|m| m.as_str().to_string());
-            let salience: i32 = captures
-                .get(3)
-                .map(|m| m.as_str().parse().unwrap_or(0))
-                .unwrap_or(0);
-            let when_clause = captures.get(4).unwrap().as_str();
-            let then_clause = captures.get(5).unwrap().as_str();
-
-            let when_condition = self.parse_condition(when_clause)?;
-            let then_actions = self.parse_actions(then_clause)?;
-
-            let mut rule = Rule::new(name, salience, when_condition, then_actions);
-            if let Some(desc) = description {
-                rule = rule.with_description(desc);
-            }
-
-            Ok(rule)
-        } else {
-            Err("Invalid GRL syntax".to_string())
+        let mut rules = self.parse_rules(grl_text)?;
+        match rules.len() {
+            1 => Ok(rules.remove(0)),
+            n => Err(format!("Expected exactly one rule, found {}", n)),
         }
     }
 
-    fn parse_condition(&self, condition_text: &str) -> std::result::Result<Expression, String> {
-        let trimmed = condition_text.trim();
+    /// Parses text containing any number of rules.
+    pub fn parse_rules(&self, grl_text: &str) -> std::result::Result<Vec<Rule>, String> {
+        let grl = GrlGrammar::parse(GrammarRule::grl, grl_text)
+            .map_err(|e| format!("Invalid GRL syntax:\n{}", e))?
+            .next()
+            .unwrap();
 
-        // Handle logical operators (AND, OR)
-        if let Some(and_pos) = trimmed.find(" && ") {
-            let left = self.parse_condition(&trimmed[..and_pos])?;
-            let right = self.parse_condition(&trimmed[and_pos + 4..])?;
-            return Ok(Expression::And(Box::new(left), Box::new(right)));
-        }
-
-        if let Some(or_pos) = trimmed.find(" || ") {
-            let left = self.parse_condition(&trimmed[..or_pos])?;
-            let right = self.parse_condition(&trimmed[or_pos + 4..])?;
-            return Ok(Expression::Or(Box::new(left), Box::new(right)));
-        }
-
-        // Handle simple comparisons
-        if let Some(captures) = self.condition_pattern.captures(trimmed) {
-            let left_var = captures.get(1).unwrap().as_str();
-            let operator = captures.get(2).unwrap().as_str();
-            let right_value = captures.get(3).unwrap().as_str().trim();
-
-            let left_expr = self.parse_variable_or_field(left_var);
-            let right_expr = self.parse_value(right_value)?;
-
-            match operator {
-                "==" => Ok(Expression::Equal(Box::new(left_expr), Box::new(right_expr))),
-                "!=" => Ok(Expression::NotEqual(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
-                )),
-                "<" => Ok(Expression::LessThan(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
-                )),
-                "<=" => Ok(Expression::LessEqual(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
-                )),
-                ">" => Ok(Expression::GreaterThan(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
-                )),
-                ">=" => Ok(Expression::GreaterEqual(
-                    Box::new(left_expr),
-                    Box::new(right_expr),
-                )),
-                _ => Err(format!("Unknown operator: {}", operator)),
-            }
-        } else {
-            Err(format!("Cannot parse condition: {}", trimmed))
-        }
+        grl.into_inner()
+            .filter(|pair| pair.as_rule() == GrammarRule::rule_def)
+            .map(|pair| self.parse_rule_def(pair))
+            .collect()
     }
 
-    fn parse_actions(&self, actions_text: &str) -> std::result::Result<Vec<Expression>, String> {
-        let mut actions = Vec::new();
+    fn parse_rule_def(&self, pair: Pair<GrammarRule>) -> std::result::Result<Rule, String> {
+        let mut name = String::new();
+        let mut description = None;
+        let mut salience = 0;
+        let mut when_condition = None;
+        let mut then_actions = Vec::new();
 
-        // Split by semicolon and parse each action
-        for action_text in actions_text.split(';') {
-            let trimmed = action_text.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            if let Some(eq_pos) = trimmed.find(" = ") {
-                let left = trimmed[..eq_pos].trim();
-                let right = trimmed[eq_pos + 3..].trim();
-
-                if left.contains('.') {
-                    // Field assignment: Object.Field = value
-                    let parts: Vec<&str> = left.split('.').collect();
-                    if parts.len() == 2 {
-                        let obj_name = parts[0].to_string();
-                        let field_name = parts[1].to_string();
-                        let value_expr = self.parse_value(right)?;
-                        actions.push(Expression::FieldAssignment(
-                            obj_name,
-                            field_name,
-                            Box::new(value_expr),
-                        ));
-                    }
-                } else {
-                    // Variable assignment: variable = value
-                    let var_name = left.to_string();
-                    let value_expr = self.parse_value(right)?;
-                    actions.push(Expression::Assignment(var_name, Box::new(value_expr)));
+        for part in pair.into_inner() {
+            match part.as_rule() {
+                GrammarRule::ident => name = part.as_str().to_string(),
+                GrammarRule::description => {
+                    description = Some(parse_string(part.into_inner().next().unwrap())?)
                 }
+                GrammarRule::salience => {
+                    let int = part.into_inner().last().unwrap();
+                    salience = int
+                        .as_str()
+                        .parse()
+                        .map_err(|_| format!("Invalid salience: {}", int.as_str()))?;
+                }
+                GrammarRule::expr => when_condition = Some(self.parse_expr(part.into_inner())?),
+                GrammarRule::action => then_actions.push(self.parse_action(part)?),
+                _ => {} // keywords
             }
         }
 
-        Ok(actions)
+        let mut rule = Rule::new(name, salience, when_condition.unwrap(), then_actions);
+        if let Some(desc) = description {
+            rule = rule.with_description(desc);
+        }
+        Ok(rule)
     }
 
-    fn parse_variable_or_field(&self, var_text: &str) -> Expression {
-        if let Some(dot_pos) = var_text.find('.') {
-            let obj_name = var_text[..dot_pos].to_string();
-            let field_name = var_text[dot_pos + 1..].to_string();
-            Expression::FieldAccess(Box::new(Expression::Variable(obj_name)), field_name)
-        } else {
-            Expression::Variable(var_text.to_string())
+    fn parse_action(&self, pair: Pair<GrammarRule>) -> std::result::Result<Expression, String> {
+        let mut parts = pair.into_inner();
+        let target = parts.next().unwrap();
+        let op = parts.next().unwrap().as_str();
+        let mut value = self.parse_expr(parts.next().unwrap().into_inner())?;
+
+        // Desugar compound assignment: `x += e` becomes `x = x + e`
+        if op != "=" {
+            let current = Box::new(parse_path(target.clone()));
+            let rhs = Box::new(value);
+            value = match op {
+                "+=" => Expression::Add(current, rhs),
+                "-=" => Expression::Subtract(current, rhs),
+                "*=" => Expression::Multiply(current, rhs),
+                "/=" => Expression::Divide(current, rhs),
+                _ => unreachable!("unknown assignment operator {}", op),
+            };
         }
+
+        let path = target
+            .into_inner()
+            .map(|p| p.as_str().to_string())
+            .collect();
+        Ok(Expression::Assign(path, Box::new(value)))
     }
 
-    fn parse_value(&self, value_text: &str) -> std::result::Result<Expression, String> {
-        let trimmed = value_text.trim();
-
-        // Try to parse as number
-        if let Ok(num) = trimmed.parse::<f64>() {
-            return Ok(Expression::Number(num));
-        }
-
-        // Try to parse as boolean
-        if trimmed == "true" {
-            return Ok(Expression::Boolean(true));
-        } else if trimmed == "false" {
-            return Ok(Expression::Boolean(false));
-        }
-
-        // Try to parse as string literal
-        if trimmed.starts_with('"') && trimmed.ends_with('"') {
-            let string_content = trimmed[1..trimmed.len() - 1].to_string();
-            return Ok(Expression::String(string_content));
-        }
-
-        // Check if it's a variable or field access
-        if trimmed
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
-        {
-            return Ok(self.parse_variable_or_field(trimmed));
-        }
-
-        // Try to parse as arithmetic expression
-        if let Some(plus_pos) = trimmed.rfind(" + ") {
-            let left = self.parse_value(&trimmed[..plus_pos])?;
-            let right = self.parse_value(&trimmed[plus_pos + 3..])?;
-            return Ok(Expression::Add(Box::new(left), Box::new(right)));
-        }
-
-        Err(format!("Cannot parse value: {}", trimmed))
+    fn parse_expr(&self, pairs: Pairs<GrammarRule>) -> std::result::Result<Expression, String> {
+        self.pratt
+            .map_primary(|primary| match primary.as_rule() {
+                GrammarRule::number => primary
+                    .as_str()
+                    .parse()
+                    .map(Expression::Number)
+                    .map_err(|_| format!("Invalid number: {}", primary.as_str())),
+                GrammarRule::string => parse_string(primary).map(Expression::String),
+                GrammarRule::boolean => Ok(Expression::Boolean(primary.as_str() == "true")),
+                GrammarRule::path => Ok(parse_path(primary)),
+                GrammarRule::expr => self.parse_expr(primary.into_inner()),
+                rule => unreachable!("unexpected primary {:?}", rule),
+            })
+            .map_prefix(|op, operand| {
+                let operand = operand?;
+                Ok(match op.as_rule() {
+                    GrammarRule::not => Expression::Not(Box::new(operand)),
+                    GrammarRule::neg => match operand {
+                        Expression::Number(n) => Expression::Number(-n),
+                        other => {
+                            Expression::Subtract(Box::new(Expression::Number(0.0)), Box::new(other))
+                        }
+                    },
+                    rule => unreachable!("unexpected prefix {:?}", rule),
+                })
+            })
+            .map_infix(|lhs, op, rhs| {
+                let (lhs, rhs) = (Box::new(lhs?), Box::new(rhs?));
+                Ok(match op.as_rule() {
+                    GrammarRule::or => Expression::Or(lhs, rhs),
+                    GrammarRule::and => Expression::And(lhs, rhs),
+                    GrammarRule::eq => Expression::Equal(lhs, rhs),
+                    GrammarRule::ne => Expression::NotEqual(lhs, rhs),
+                    GrammarRule::lt => Expression::LessThan(lhs, rhs),
+                    GrammarRule::le => Expression::LessEqual(lhs, rhs),
+                    GrammarRule::gt => Expression::GreaterThan(lhs, rhs),
+                    GrammarRule::ge => Expression::GreaterEqual(lhs, rhs),
+                    GrammarRule::add => Expression::Add(lhs, rhs),
+                    GrammarRule::sub => Expression::Subtract(lhs, rhs),
+                    GrammarRule::mul => Expression::Multiply(lhs, rhs),
+                    GrammarRule::div => Expression::Divide(lhs, rhs),
+                    rule => unreachable!("unexpected infix {:?}", rule),
+                })
+            })
+            .parse(pairs)
     }
+}
+
+fn parse_path(pair: Pair<GrammarRule>) -> Expression {
+    let mut segments = pair.into_inner().map(|p| p.as_str().to_string());
+    let root = Expression::Variable(segments.next().unwrap());
+    segments.fold(root, |obj, field| {
+        Expression::FieldAccess(Box::new(obj), field)
+    })
+}
+
+fn parse_string(pair: Pair<GrammarRule>) -> std::result::Result<String, String> {
+    let raw = pair.into_inner().next().unwrap().as_str();
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(other) => return Err(format!("Invalid escape sequence: \\{}", other)),
+            None => return Err("Unterminated escape sequence".to_string()),
+        }
+    }
+    Ok(out)
 }
 
 impl Default for GrlParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::RuleEngine;
+    use crate::facts::{Fact, FactValue};
+    use std::collections::HashMap;
+
+    fn var(name: &str) -> Box<Expression> {
+        Box::new(Expression::Variable(name.to_string()))
+    }
+
+    fn num(n: f64) -> Box<Expression> {
+        Box::new(Expression::Number(n))
+    }
+
+    fn when_of(condition: &str) -> Expression {
+        let grl = format!("rule R {{ when {} then }}", condition);
+        GrlParser::new().parse_rule(&grl).unwrap().when_condition
+    }
+
+    #[test]
+    fn test_arithmetic_precedence() {
+        // a + b * c parses as a + (b * c)
+        assert_eq!(
+            when_of("a + b * c > 0"),
+            Expression::GreaterThan(
+                Box::new(Expression::Add(
+                    var("a"),
+                    Box::new(Expression::Multiply(var("b"), var("c")))
+                )),
+                num(0.0),
+            )
+        );
+    }
+
+    #[test]
+    fn test_logical_precedence() {
+        // && binds tighter than ||
+        assert_eq!(
+            when_of("a || b && c"),
+            Expression::Or(var("a"), Box::new(Expression::And(var("b"), var("c"))))
+        );
+    }
+
+    #[test]
+    fn test_parentheses_override_precedence() {
+        assert_eq!(
+            when_of("(a || b) && c"),
+            Expression::And(Box::new(Expression::Or(var("a"), var("b"))), var("c"))
+        );
+        assert_eq!(
+            when_of("(a + b) * c == 1"),
+            Expression::Equal(
+                Box::new(Expression::Multiply(
+                    Box::new(Expression::Add(var("a"), var("b"))),
+                    var("c")
+                )),
+                num(1.0),
+            )
+        );
+    }
+
+    #[test]
+    fn test_left_associativity() {
+        // a - b - c parses as (a - b) - c
+        assert_eq!(
+            when_of("a - b - c == 0"),
+            Expression::Equal(
+                Box::new(Expression::Subtract(
+                    Box::new(Expression::Subtract(var("a"), var("b"))),
+                    var("c")
+                )),
+                num(0.0),
+            )
+        );
+    }
+
+    #[test]
+    fn test_unary_operators() {
+        assert_eq!(
+            when_of("!done && x > -5"),
+            Expression::And(
+                Box::new(Expression::Not(var("done"))),
+                Box::new(Expression::GreaterThan(var("x"), num(-5.0))),
+            )
+        );
+        assert_eq!(
+            when_of("-x < 0"),
+            Expression::LessThan(Box::new(Expression::Subtract(num(0.0), var("x"))), num(0.0))
+        );
+    }
+
+    #[test]
+    fn test_nested_field_access() {
+        assert_eq!(
+            when_of("order.customer.age >= 18"),
+            Expression::GreaterEqual(
+                Box::new(Expression::FieldAccess(
+                    Box::new(Expression::FieldAccess(
+                        var("order"),
+                        "customer".to_string()
+                    )),
+                    "age".to_string(),
+                )),
+                num(18.0),
+            )
+        );
+    }
+
+    #[test]
+    fn test_string_escapes() {
+        assert_eq!(
+            when_of(r#"msg == "say \"hi\"\n""#),
+            Expression::Equal(
+                var("msg"),
+                Box::new(Expression::String("say \"hi\"\n".to_string()))
+            )
+        );
+    }
+
+    #[test]
+    fn test_identifiers_starting_with_keywords() {
+        assert_eq!(when_of("ruleset && thenable && trueish"), {
+            Expression::And(
+                Box::new(Expression::And(var("ruleset"), var("thenable"))),
+                var("trueish"),
+            )
+        });
+    }
+
+    #[test]
+    fn test_compound_assignment() {
+        let rule = GrlParser::new()
+            .parse_rule("rule R { when true then x += 1; car.Speed *= 2; }")
+            .unwrap();
+        assert_eq!(
+            rule.then_actions,
+            vec![
+                Expression::assign(&["x"], Expression::Add(var("x"), num(1.0))),
+                Expression::assign(
+                    &["car", "Speed"],
+                    Expression::Multiply(
+                        Box::new(Expression::FieldAccess(var("car"), "Speed".to_string())),
+                        num(2.0),
+                    ),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_multiple_rules_with_comments() {
+        let grl = r#"
+            // Line comment
+            rule First "first rule" salience 10 {
+                when x > 1 /* inline comment */ then y = 1;
+            }
+
+            /* Block
+               comment */
+            rule Second salience -5 {
+                when true
+                then z = "two";
+            }
+        "#;
+        let rules = GrlParser::new().parse_rules(grl).unwrap();
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[0].name, "First");
+        assert_eq!(rules[0].description, Some("first rule".to_string()));
+        assert_eq!(rules[0].salience, 10);
+        assert_eq!(rules[1].name, "Second");
+        assert_eq!(rules[1].description, None);
+        assert_eq!(rules[1].salience, -5);
+    }
+
+    #[test]
+    fn test_parse_rule_requires_exactly_one_rule() {
+        let parser = GrlParser::new();
+        assert!(parser.parse_rule("").is_err());
+        assert!(parser
+            .parse_rule("rule A { when true then } rule B { when true then }")
+            .is_err());
+    }
+
+    #[test]
+    fn test_syntax_errors_report_location() {
+        let parser = GrlParser::new();
+        let err = parser
+            .parse_rule("rule Broken {\n  when x > \n  then y = 1;\n}")
+            .unwrap_err();
+        assert!(err.contains("3:"), "error should point at line 3: {}", err);
+
+        assert!(parser
+            .parse_rule("rule R { when x > 1 then y = 1 }")
+            .is_err()); // missing ';'
+        assert!(parser
+            .parse_rule("rule R { when (x > 1 then y = 1; }")
+            .is_err()); // unbalanced paren
+        assert!(parser.parse_rule("rule then { when true then }").is_err()); // keyword as name
+    }
+
+    #[test]
+    fn test_nested_field_assignment() {
+        let rule = GrlParser::new()
+            .parse_rule("rule R { when true then a.b.c = 1; a.b.c += 2; }")
+            .unwrap();
+        let current = Expression::FieldAccess(
+            Box::new(Expression::FieldAccess(var("a"), "b".to_string())),
+            "c".to_string(),
+        );
+        assert_eq!(
+            rule.then_actions,
+            vec![
+                Expression::assign(&["a", "b", "c"], Expression::Number(1.0)),
+                Expression::assign(
+                    &["a", "b", "c"],
+                    Expression::Add(Box::new(current), num(2.0))
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parsed_rule_executes() {
+        let grl = r#"
+            rule CheckEligibility "Check if customer is eligible" salience 10 {
+                when
+                    customer.age >= 18 && (customer.balance > 1000 || customer.vip == true)
+                then
+                    customer.eligible = true;
+                    message = "Customer is eligible for premium service";
+            }
+        "#;
+        let mut engine = RuleEngine::new();
+        engine
+            .add_rule(GrlParser::new().parse_rule(grl).unwrap())
+            .unwrap();
+
+        let mut facts = HashMap::new();
+        facts.insert(
+            "customer".to_string(),
+            Fact::from_object(
+                "customer".to_string(),
+                HashMap::from([
+                    ("age".to_string(), FactValue::Number(30.0)),
+                    ("balance".to_string(), FactValue::Number(500.0)),
+                    ("vip".to_string(), FactValue::Boolean(true)),
+                ]),
+            ),
+        );
+
+        let result = engine.execute(&mut facts).unwrap();
+        assert_eq!(result.rules_fired, vec!["CheckEligibility".to_string()]);
+        assert_eq!(
+            facts["customer"].get_field("eligible"),
+            Some(&FactValue::Boolean(true))
+        );
+        assert_eq!(
+            facts["message"].value,
+            FactValue::String("Customer is eligible for premium service".to_string())
+        );
     }
 }

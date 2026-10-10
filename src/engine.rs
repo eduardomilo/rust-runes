@@ -255,21 +255,50 @@ impl RuleEngine {
         facts: &mut HashMap<String, Fact>,
     ) -> std::result::Result<(), EngineError> {
         match action {
-            Expression::Assignment(var_name, value_expr) => {
+            Expression::Assign(path, value_expr) => {
                 let value = self.evaluate_expression(value_expr, facts)?;
-                facts.insert(var_name.clone(), Fact::new(var_name.clone(), value));
-                Ok(())
-            }
+                let (root, fields) = path.split_first().ok_or_else(|| {
+                    EngineError::EvaluationError("Empty assignment target".to_string())
+                })?;
 
-            Expression::FieldAssignment(obj_name, field_name, value_expr) => {
-                let value = self.evaluate_expression(value_expr, facts)?;
-                if let Some(fact) = facts.get_mut(obj_name) {
-                    fact.set_field(field_name.clone(), value)
-                        .map_err(EngineError::EvaluationError)?;
-                } else {
-                    return Err(EngineError::UnknownVariable(obj_name.clone()));
+                let Some((last, intermediate)) = fields.split_last() else {
+                    facts.insert(root.clone(), Fact::new(root.clone(), value));
+                    return Ok(());
+                };
+
+                let fact = facts
+                    .get_mut(root)
+                    .ok_or_else(|| EngineError::UnknownVariable(root.clone()))?;
+
+                // Walk down to the object that owns the final field
+                let mut target = &mut fact.value;
+                for (depth, field) in intermediate.iter().enumerate() {
+                    let FactValue::Object(obj) = target else {
+                        return Err(EngineError::TypeError(format!(
+                            "Cannot access field '{}' on non-object '{}'",
+                            field,
+                            path[..=depth].join(".")
+                        )));
+                    };
+                    target = obj.get_mut(field).ok_or_else(|| {
+                        EngineError::EvaluationError(format!(
+                            "Field '{}' not found",
+                            path[..=depth + 1].join(".")
+                        ))
+                    })?;
                 }
-                Ok(())
+
+                match target {
+                    FactValue::Object(obj) => {
+                        obj.insert(last.clone(), value);
+                        Ok(())
+                    }
+                    _ => Err(EngineError::TypeError(format!(
+                        "Cannot set field '{}' on non-object '{}'",
+                        last,
+                        path[..path.len() - 1].join(".")
+                    ))),
+                }
             }
 
             _ => Err(EngineError::EvaluationError(
@@ -296,5 +325,119 @@ impl RuleEngine {
 impl Default for RuleEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::GrlParser;
+
+    fn obj(fields: Vec<(&str, FactValue)>) -> FactValue {
+        FactValue::Object(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )
+    }
+
+    fn order_facts() -> HashMap<String, Fact> {
+        let order = obj(vec![
+            (
+                "customer",
+                obj(vec![
+                    ("age", FactValue::Number(30.0)),
+                    (
+                        "address",
+                        obj(vec![("city", FactValue::String("Porto".to_string()))]),
+                    ),
+                ]),
+            ),
+            ("total", FactValue::Number(100.0)),
+        ]);
+        HashMap::from([("order".to_string(), Fact::new("order".to_string(), order))])
+    }
+
+    fn run(grl: &str, facts: &mut HashMap<String, Fact>) -> Result<ExecutionResult, EngineError> {
+        let mut engine = RuleEngine::new();
+        engine
+            .add_rule(GrlParser::new().parse_rule(grl).unwrap())
+            .unwrap();
+        engine.execute(facts)
+    }
+
+    fn customer_field<'a>(facts: &'a HashMap<String, Fact>, field: &str) -> Option<&'a FactValue> {
+        facts["order"]
+            .get_field("customer")?
+            .as_object()?
+            .get(field)
+    }
+
+    #[test]
+    fn test_nested_assignment_updates_deep_field() {
+        let mut facts = order_facts();
+        run(
+            r#"rule R { when order.customer.address.city == "Porto"
+                        then order.customer.address.city = "Lisbon"; order.customer.age += 1; }"#,
+            &mut facts,
+        )
+        .unwrap();
+
+        assert_eq!(
+            customer_field(&facts, "address")
+                .unwrap()
+                .as_object()
+                .unwrap()["city"],
+            FactValue::String("Lisbon".to_string())
+        );
+        assert_eq!(
+            customer_field(&facts, "age"),
+            Some(&FactValue::Number(31.0))
+        );
+    }
+
+    #[test]
+    fn test_nested_assignment_creates_leaf_field() {
+        let mut facts = order_facts();
+        run(
+            "rule R { when true then order.customer.vip = true; }",
+            &mut facts,
+        )
+        .unwrap();
+        assert_eq!(
+            customer_field(&facts, "vip"),
+            Some(&FactValue::Boolean(true))
+        );
+    }
+
+    #[test]
+    fn test_nested_assignment_missing_intermediate_field() {
+        let mut facts = order_facts();
+        let err = run(
+            "rule R { when true then order.shipping.city = \"X\"; }",
+            &mut facts,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("order.shipping"), "{}", err);
+    }
+
+    #[test]
+    fn test_nested_assignment_through_non_object() {
+        let mut facts = order_facts();
+        let err = run(
+            "rule R { when true then order.total.cents = 5; }",
+            &mut facts,
+        )
+        .unwrap_err();
+        assert!(matches!(err, EngineError::TypeError(_)), "{}", err);
+        assert!(err.to_string().contains("order.total"), "{}", err);
+    }
+
+    #[test]
+    fn test_nested_assignment_unknown_root() {
+        let mut facts = order_facts();
+        let err = run("rule R { when true then invoice.total = 1; }", &mut facts).unwrap_err();
+        assert!(matches!(err, EngineError::UnknownVariable(ref name) if name == "invoice"));
     }
 }
