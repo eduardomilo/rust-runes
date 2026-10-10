@@ -1,4 +1,5 @@
 pub mod ast;
+mod bitset;
 mod compiled;
 pub mod engine;
 pub mod facts;

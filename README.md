@@ -81,17 +81,25 @@ Execution ends when no condition holds.
   gives the underlying error.
 - `&&` and `||` short-circuit.
 
-Two optimizations avoid re-evaluating everything each cycle, without changing which
-rules fire:
+Several optimizations avoid re-evaluating everything each cycle, without changing
+which rules fire:
 
-- **Condition caching**, in the role of Grule's working memory: a condition's result
-  is reused until a rule assigns to (or calls a method on) a fact path it reads.
-  `Changed("Fact.Field")` / `Forget("Fact.Field")` mark a path as changed for cases the
-  engine can't see. Conditions that use `Now()`, logging, or your own functions or
-  methods are always re-evaluated. `set_condition_caching(false)` turns caching off.
-- **Stopping at the first match**: once a cycle's highest-salience match is found,
-  lower rules are skipped, unless evaluating them is observable (a listener is
-  attached, evaluation errors are returned, or the condition logs or calls your code).
+- **Shared sub-expressions**, in the role of Grule's working memory: identical
+  boolean sub-expressions across all rules (`Fact.Distance > 5000`, `A && B`, ...) are
+  recognized when rules are loaded and evaluated once, with the result reused until a
+  fact path they read changes.
+- **An incrementally maintained agenda**: each rule's condition result is kept until a
+  rule assigns to (or calls a method on) a fact path it reads, so a cycle only
+  evaluates rules whose inputs changed. Finding the next rule to fire doesn't scan
+  the rule set.
+- **Stopping at the first match**: rules below the cycle's highest-salience match are
+  not evaluated, unless that is observable (a listener is attached, evaluation errors
+  are returned, or the condition logs or calls your code). In those cases every rule
+  is evaluated every cycle, as in Grule.
+
+`Changed("Fact.Field")` / `Forget("Fact.Field")` mark a path as changed for cases the
+engine can't see. Conditions that use `Now()`, logging, or your own functions or
+methods are always re-evaluated. `set_condition_caching(false)` turns result reuse off.
 
 The engine also provides:
 
@@ -180,8 +188,9 @@ statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
 
 ## Differences from Grule
 
-- Instead of RETE's per-expression working memory, whole condition results are cached
-  and invalidated by the fact paths rules write (see Execution Model).
+- Like Grule, this is not a full RETE network: there are no join nodes or partial
+  matches. Shared sub-expression results and the agenda are invalidated by the fact
+  paths rules write (see Execution Model).
 - There is no knowledge library with named, versioned knowledge bases; an engine holds
   one set of rules. Rules load from GRL text and files (not Grule's JSON rule format,
   URLs or bundles).

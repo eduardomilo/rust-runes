@@ -1,11 +1,13 @@
-use crate::compiled::{path_from_snippet, CompiledRule, Node, Path as FactPath};
+use crate::bitset::BitSet;
+use crate::compiled::{path_from_snippet, CompiledRule, MemoSlot, Node, Path as FactPath};
 use crate::facts::{Fact, FactValue};
 use crate::functions::{self, Function, Method};
 use crate::knowledge_base::KnowledgeBase;
 use crate::operators;
 use crate::rule::Rule;
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::fmt::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -115,10 +117,61 @@ impl Default for ExecutionResult {
 /// Per-execution state changed by engine functions like `Retract` and `Complete`.
 #[derive(Default)]
 struct ExecutionState {
-    retracted: HashSet<String>,
+    /// Rules retracted by the current rule's actions
+    retracted: Vec<String>,
     completed: bool,
     /// Paths named by `Changed` / `Forget` in the current rule's actions
     changed: Vec<FactPath>,
+}
+
+/// Per-execution rule state, by salience position.
+struct Agenda {
+    /// Rules whose condition result is unknown (always includes rules whose results
+    /// can't be reused)
+    dirty: BitSet,
+    /// Rules known to match
+    matching: BitSet,
+    retracted: BitSet,
+}
+
+/// Memoized results of shared boolean sub-expressions for one execution (see
+/// `compiled::Interner`). Uses `Cell`s so evaluation can fill it through `&self`.
+struct Memo {
+    slots: Vec<Cell<u8>>,
+}
+
+impl Memo {
+    const UNKNOWN: u8 = 0;
+
+    fn new(slot_count: usize) -> Self {
+        Memo {
+            slots: vec![Cell::new(Self::UNKNOWN); slot_count],
+        }
+    }
+
+    /// A memo that never stores anything.
+    fn disabled() -> Self {
+        Memo { slots: Vec::new() }
+    }
+
+    fn is_enabled(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
+    fn get(&self, slot: MemoSlot) -> Option<bool> {
+        match self.slots[slot].get() {
+            Self::UNKNOWN => None,
+            value => Some(value == 2),
+        }
+    }
+
+    fn set(&self, slot: MemoSlot, value: bool) {
+        self.slots[slot].set(if value { 2 } else { 1 });
+    }
+
+    fn forget(&self, slot: MemoSlot) {
+        self.slots[slot].set(Self::UNKNOWN);
+    }
 }
 
 /// One step of a path into a fact, e.g. `.customer` or `[0]`.
@@ -254,62 +307,57 @@ impl RuleEngine {
         let start_time = std::time::Instant::now();
         let mut result = ExecutionResult::new();
         let mut state = ExecutionState::default();
+        let kb = &self.knowledge_base;
+        let n = kb.len();
+
+        // Rule state by salience position: `dirty` rules have no known result;
+        // `agenda` holds rules known to match
+        let mut agenda = Agenda {
+            dirty: BitSet::new(n, true),
+            matching: BitSet::new(n, false),
+            retracted: BitSet::new(n, false),
+        };
+        let memo = Memo::new(if self.condition_caching {
+            kb.interner().slot_count()
+        } else {
+            0
+        });
+
+        // Every evaluation is observable with a listener or when errors are returned,
+        // so evaluate every rule each cycle as Grule does
+        let full_evaluation =
+            !self.listeners.is_empty() || self.return_err_on_failed_rule_evaluation;
+        // Otherwise only conditions with effects must run every cycle
+        let mut always = BitSet::new(n, false);
+        let mut always_positions = Vec::new();
+        if !full_evaluation && !kb.all_conditions_skippable(!self.methods.is_empty()) {
+            for position in 0..n {
+                if !self.is_skippable(kb.entry_at(position).2) {
+                    always.insert(position);
+                    always_positions.push(position);
+                    agenda.dirty.remove(position);
+                }
+            }
+        }
+
         let mut cycle: u64 = 0;
-
-        // Cached condition results, by rule index
-        let mut cache: Vec<Option<bool>> = vec![None; self.knowledge_base.len()];
-        let may_skip = self.listeners.is_empty() && !self.return_err_on_failed_rule_evaluation;
-        // When no condition has effects, nothing after the first match needs evaluating
-        let stop_at_first_match = may_skip
-            && self
-                .knowledge_base
-                .all_conditions_skippable(!self.methods.is_empty());
-
         loop {
             check_cancel(cancel)?;
             self.listeners.iter().for_each(|l| l.begin_cycle(cycle + 1));
 
-            let mut selected = None;
-            for (index, rule, compiled) in self.knowledge_base.entries_by_salience() {
-                check_cancel(cancel)?;
-                if state.retracted.contains(&rule.name) {
-                    continue;
-                }
-                if selected.is_some() {
-                    if stop_at_first_match {
-                        break;
-                    }
-                    if may_skip && self.is_skippable(compiled) {
-                        continue;
-                    }
-                }
-                let matched = match cache[index] {
-                    Some(matched) => matched,
-                    None => {
-                        let matched = self.test_rule(rule, compiled, facts)?;
-                        if self.is_cacheable(compiled) {
-                            cache[index] = Some(matched);
-                        }
-                        matched
-                    }
-                };
-                self.listeners
-                    .iter()
-                    .for_each(|l| l.evaluate_rule(cycle + 1, rule, matched));
-                // Rules come in salience order, so the first match has the highest salience
-                if matched && selected.is_none() {
-                    selected = Some((rule, compiled));
-                }
-            }
-
-            let Some((rule, compiled)) = selected else {
-                break;
+            let selected = if full_evaluation {
+                self.select_by_full_evaluation(cycle + 1, &mut agenda, facts, &memo, cancel)?
+            } else {
+                self.select_incrementally(&mut agenda, &always_positions, facts, &memo, cancel)?
             };
+
+            let Some(position) = selected else { break };
             cycle += 1;
             if cycle > self.max_cycles as u64 {
                 return Err(EngineError::MaxCyclesExceeded(self.max_cycles));
             }
 
+            let (_, rule, compiled) = kb.entry_at(position);
             self.listeners
                 .iter()
                 .for_each(|l| l.execute_rule(cycle, rule));
@@ -322,14 +370,112 @@ impl RuleEngine {
                 break;
             }
 
+            for name in state.retracted.drain(..) {
+                let position = kb.position_of(kb.index_of(&name).expect("checked by Retract"));
+                agenda.retracted.insert(position);
+                agenda.matching.remove(position);
+                agenda.dirty.remove(position);
+            }
             for written in compiled.writes.iter().chain(&state.changed) {
-                self.invalidate(&mut cache, written);
+                self.invalidate(written, &mut agenda, &always, &memo);
             }
             state.changed.clear();
         }
 
         result.execution_time_ms = start_time.elapsed().as_millis();
         Ok(result)
+    }
+
+    /// Finds the highest-salience matching rule by evaluating every rule (using known
+    /// results where still valid) and notifying listeners of each.
+    fn select_by_full_evaluation(
+        &self,
+        cycle: u64,
+        agenda: &mut Agenda,
+        facts: &HashMap<String, Fact>,
+        memo: &Memo,
+        cancel: &AtomicBool,
+    ) -> Result<Option<usize>, EngineError> {
+        let mut selected = None;
+        for position in 0..self.knowledge_base.len() {
+            check_cancel(cancel)?;
+            if agenda.retracted.contains(position) {
+                continue;
+            }
+            let (_, rule, compiled) = self.knowledge_base.entry_at(position);
+            let matched = if agenda.dirty.contains(position) || !self.is_cacheable(compiled) {
+                self.evaluate_into(position, rule, compiled, agenda, facts, memo)?
+            } else {
+                agenda.matching.contains(position)
+            };
+            self.listeners
+                .iter()
+                .for_each(|l| l.evaluate_rule(cycle, rule, matched));
+            if matched && selected.is_none() {
+                selected = Some(position);
+            }
+        }
+        Ok(selected)
+    }
+
+    /// Finds the highest-salience matching rule while evaluating as little as possible:
+    /// the best known match is the first rule on the agenda, so only rules above it
+    /// whose results are unknown need evaluating (plus conditions with effects).
+    fn select_incrementally(
+        &self,
+        agenda: &mut Agenda,
+        always: &[usize],
+        facts: &HashMap<String, Fact>,
+        memo: &Memo,
+        cancel: &AtomicBool,
+    ) -> Result<Option<usize>, EngineError> {
+        let mut best = agenda.matching.next_from(0);
+
+        for &position in always {
+            if agenda.retracted.contains(position) {
+                continue;
+            }
+            check_cancel(cancel)?;
+            let (_, rule, compiled) = self.knowledge_base.entry_at(position);
+            if self.test_rule(rule, compiled, facts, memo)? && best.is_none_or(|b| position < b) {
+                best = Some(position);
+            }
+        }
+
+        let mut cursor = 0;
+        while let Some(position) = agenda.dirty.next_from(cursor) {
+            if best.is_some_and(|b| position >= b) {
+                break;
+            }
+            cursor = position + 1;
+            check_cancel(cancel)?;
+            let (_, rule, compiled) = self.knowledge_base.entry_at(position);
+            if self.evaluate_into(position, rule, compiled, agenda, facts, memo)? {
+                best = Some(position);
+                break;
+            }
+        }
+        Ok(best)
+    }
+
+    /// Evaluates a rule's condition and, if its result can be reused, records it.
+    fn evaluate_into(
+        &self,
+        position: usize,
+        rule: &Rule,
+        compiled: &CompiledRule,
+        agenda: &mut Agenda,
+        facts: &HashMap<String, Fact>,
+        memo: &Memo,
+    ) -> Result<bool, EngineError> {
+        let matched = self.test_rule(rule, compiled, facts, memo)?;
+        if self.is_cacheable(compiled) {
+            agenda.dirty.remove(position);
+            if matched {
+                agenda.matching.insert(position);
+            }
+        }
+        Ok(matched)
     }
 
     /// Whether a rule's condition result can be reused until its inputs change.
@@ -343,21 +489,28 @@ impl RuleEngine {
     }
 
     fn calls_user_methods(&self, compiled: &CompiledRule) -> bool {
-        !self.methods.is_empty()
-            && compiled
-                .condition_methods
-                .iter()
-                .any(|name| self.methods.contains_key(name))
+        self.any_user_method(&compiled.condition_methods)
     }
 
-    /// Forgets cached results of conditions that read anything under `written`.
-    fn invalidate(&self, cache: &mut [Option<bool>], written: &[String]) {
-        let Some(root) = written.first() else { return };
-        for &index in self.knowledge_base.readers_of(root) {
-            if cache[index].is_some() && self.knowledge_base.compiled(index).reads_overlap(written)
-            {
-                cache[index] = None;
+    fn any_user_method(&self, names: &[String]) -> bool {
+        !self.methods.is_empty() && names.iter().any(|name| self.methods.contains_key(name))
+    }
+
+    /// Forgets results that depend on anything under `written`: the conditions that
+    /// read it go back to unknown, and so do memoized sub-expressions that read it.
+    fn invalidate(&self, written: &[String], agenda: &mut Agenda, always: &BitSet, memo: &Memo) {
+        let kb = &self.knowledge_base;
+        kb.readers().overlapping(written, |index| {
+            let position = kb.position_of(index);
+            if !agenda.retracted.contains(position) && !always.contains(position) {
+                agenda.matching.remove(position);
+                agenda.dirty.insert(position);
             }
+        });
+        if memo.is_enabled() {
+            kb.interner()
+                .slot_readers()
+                .overlapping(written, |slot| memo.forget(slot));
         }
     }
 
@@ -367,9 +520,16 @@ impl RuleEngine {
         &self,
         facts: &HashMap<String, Fact>,
     ) -> Result<Vec<&Rule>, EngineError> {
+        let kb = &self.knowledge_base;
+        let memo = Memo::new(if self.condition_caching {
+            kb.interner().slot_count()
+        } else {
+            0
+        });
         let mut matching = Vec::new();
-        for (_, rule, compiled) in self.knowledge_base.entries_by_salience() {
-            if self.test_rule(rule, compiled, facts)? {
+        for position in 0..kb.len() {
+            let (_, rule, compiled) = kb.entry_at(position);
+            if self.test_rule(rule, compiled, facts, &memo)? {
                 matching.push(rule);
             }
         }
@@ -382,8 +542,9 @@ impl RuleEngine {
         rule: &Rule,
         compiled: &CompiledRule,
         facts: &HashMap<String, Fact>,
+        memo: &Memo,
     ) -> Result<bool, EngineError> {
-        match self.evaluate_condition(&compiled.when, facts, "rule condition") {
+        match self.evaluate_condition(&compiled.when, facts, "rule condition", memo) {
             Ok(matched) => Ok(matched),
             Err(e) if self.return_err_on_failed_rule_evaluation => {
                 Err(e.in_rule(rule, RulePhase::When))
@@ -400,16 +561,40 @@ impl RuleEngine {
         node: &Node,
         facts: &HashMap<String, Fact>,
         operation: &str,
+        memo: &Memo,
     ) -> Result<bool, EngineError> {
-        operators::boolean(&*self.eval(node, facts)?, operation)
+        operators::boolean(&*self.eval(node, facts, memo)?, operation)
     }
 
+    /// Evaluates without memoization, for actions: facts change between statements.
     fn evaluate_expression(
         &self,
         node: &Node,
         facts: &HashMap<String, Fact>,
     ) -> std::result::Result<FactValue, EngineError> {
-        self.eval(node, facts).map(Cow::into_owned)
+        self.eval(node, facts, &Memo::disabled())
+            .map(Cow::into_owned)
+    }
+
+    /// Returns a memoized boolean, or computes and memoizes it.
+    fn memoized<'f>(
+        &self,
+        slot: Option<MemoSlot>,
+        memo: &Memo,
+        compute: impl FnOnce() -> Result<bool, EngineError>,
+    ) -> Result<Cow<'f, FactValue>, EngineError> {
+        let slot = slot.filter(|&slot| {
+            memo.is_enabled()
+                && !self.any_user_method(&self.knowledge_base.interner().slot_info(slot).methods)
+        });
+        if let Some(value) = slot.and_then(|slot| memo.get(slot)) {
+            return Ok(Cow::Owned(FactValue::Boolean(value)));
+        }
+        let value = compute()?;
+        if let Some(slot) = slot {
+            memo.set(slot, value);
+        }
+        Ok(Cow::Owned(FactValue::Boolean(value)))
     }
 
     /// Evaluates `node`, borrowing from `facts` (and from the rule's constants) where
@@ -418,8 +603,8 @@ impl RuleEngine {
         &self,
         node: &'f Node,
         facts: &'f HashMap<String, Fact>,
+        memo: &Memo,
     ) -> Result<Cow<'f, FactValue>, EngineError> {
-        let owned = |value| Ok(Cow::Owned(value));
         match node {
             Node::Const(value) => Ok(Cow::Borrowed(value)),
 
@@ -428,7 +613,7 @@ impl RuleEngine {
                 .map(|fact| Cow::Borrowed(&fact.value))
                 .ok_or_else(|| EngineError::UnknownVariable(name.clone())),
 
-            Node::Field(base, field) => project(self.eval(base, facts)?, |obj| match obj {
+            Node::Field(base, field) => project(self.eval(base, facts, memo)?, |obj| match obj {
                 FactValue::Object(obj) => obj.get(field).ok_or_else(|| {
                     EngineError::EvaluationError(format!("Field '{}' not found", field))
                 }),
@@ -440,8 +625,8 @@ impl RuleEngine {
             }),
 
             Node::Index(base, index_node) => {
-                let index = self.eval(index_node, facts)?;
-                project(self.eval(base, facts)?, |container| {
+                let index = self.eval(index_node, facts, memo)?;
+                project(self.eval(base, facts, memo)?, |container| {
                     match (container, &*index) {
                         (FactValue::Array(items), FactValue::Integer(n)) => {
                             Ok(&items[array_index(*n, items.len())?])
@@ -464,7 +649,7 @@ impl RuleEngine {
                 name,
                 function,
                 args,
-            } => function(name, &self.evaluate_args(args, facts)?)
+            } => function(name, &self.evaluate_args(args, facts, memo)?)
                 .map(Cow::Owned)
                 .map_err(EngineError::FunctionError),
 
@@ -474,7 +659,7 @@ impl RuleEngine {
             ))),
 
             Node::UserCall(name, args) => {
-                let args = self.evaluate_args(args, facts)?;
+                let args = self.evaluate_args(args, facts, memo)?;
                 let function = self
                     .functions
                     .get(name)
@@ -485,8 +670,8 @@ impl RuleEngine {
             }
 
             Node::Method(target_node, name, args) => {
-                let target = self.eval(target_node, facts)?;
-                let args = self.evaluate_args(args, facts)?;
+                let target = self.eval(target_node, facts, memo)?;
+                let args = self.evaluate_args(args, facts, memo)?;
                 if let Some(result) = functions::call_method(&target, name, &args) {
                     return result.map(Cow::Owned).map_err(EngineError::FunctionError);
                 }
@@ -496,36 +681,55 @@ impl RuleEngine {
                     .map(Cow::Owned)
             }
 
-            Node::Binary(op, left, right) => {
-                owned(op(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?)
-            }
-            Node::Compare(test, left, right) => {
-                let ordering =
-                    operators::compare(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?;
-                owned(FactValue::Boolean(ordering.is_some_and(test)))
-            }
+            Node::Binary(op, left, right) => Ok(Cow::Owned(op(
+                &*self.eval(left, facts, memo)?,
+                &*self.eval(right, facts, memo)?,
+            )?)),
+            Node::Compare {
+                test,
+                left,
+                right,
+                memo: slot,
+            } => self.memoized(*slot, memo, || {
+                let ordering = operators::compare(
+                    &*self.eval(left, facts, memo)?,
+                    &*self.eval(right, facts, memo)?,
+                )?;
+                Ok(ordering.is_some_and(test))
+            }),
             Node::Equal {
                 negate,
                 left,
                 right,
-            } => {
-                let equal =
-                    operators::equal(&*self.eval(left, facts)?, &*self.eval(right, facts)?)?;
-                owned(FactValue::Boolean(equal != *negate))
-            }
+                memo: slot,
+            } => self.memoized(*slot, memo, || {
+                let equal = operators::equal(
+                    &*self.eval(left, facts, memo)?,
+                    &*self.eval(right, facts, memo)?,
+                )?;
+                Ok(equal != *negate)
+            }),
 
             // && and || short-circuit, so the right side is only evaluated when needed
-            Node::And(left, right) => owned(FactValue::Boolean(
-                self.evaluate_condition(left, facts, "logical AND")?
-                    && self.evaluate_condition(right, facts, "logical AND")?,
-            )),
-            Node::Or(left, right) => owned(FactValue::Boolean(
-                self.evaluate_condition(left, facts, "logical OR")?
-                    || self.evaluate_condition(right, facts, "logical OR")?,
-            )),
-            Node::Not(inner) => owned(FactValue::Boolean(
-                !self.evaluate_condition(inner, facts, "negation")?,
-            )),
+            Node::And {
+                left,
+                right,
+                memo: slot,
+            } => self.memoized(*slot, memo, || {
+                Ok(self.evaluate_condition(left, facts, "logical AND", memo)?
+                    && self.evaluate_condition(right, facts, "logical AND", memo)?)
+            }),
+            Node::Or {
+                left,
+                right,
+                memo: slot,
+            } => self.memoized(*slot, memo, || {
+                Ok(self.evaluate_condition(left, facts, "logical OR", memo)?
+                    || self.evaluate_condition(right, facts, "logical OR", memo)?)
+            }),
+            Node::Not { inner, memo: slot } => self.memoized(*slot, memo, || {
+                Ok(!self.evaluate_condition(inner, facts, "negation", memo)?)
+            }),
 
             Node::Assign(..) => Err(EngineError::EvaluationError(
                 "Assignment cannot be used as a value".to_string(),
@@ -537,9 +741,10 @@ impl RuleEngine {
         &self,
         args: &[Node],
         facts: &HashMap<String, Fact>,
+        memo: &Memo,
     ) -> Result<Vec<FactValue>, EngineError> {
         args.iter()
-            .map(|arg| self.evaluate_expression(arg, facts))
+            .map(|arg| self.eval(arg, facts, memo).map(Cow::into_owned))
             .collect()
     }
 
@@ -595,7 +800,7 @@ impl RuleEngine {
                 if self.knowledge_base.get_rule(&rule_name).is_none() {
                     return Err(EngineError::UnknownRule(rule_name));
                 }
-                state.retracted.insert(rule_name);
+                state.retracted.push(rule_name);
                 Ok(())
             }
 
@@ -624,10 +829,9 @@ impl RuleEngine {
             // A method called on a fact path operates on the stored value, so
             // `Order.Items.Append(x);` changes the fact
             Node::Method(target, name, args) if target.is_assignable() => {
-                let args = self.evaluate_args(args, facts)?;
-                if let Some(result) =
-                    functions::call_method(&*self.eval(target, facts)?, name, &args)
-                {
+                let args = self.evaluate_args(args, facts, &Memo::disabled())?;
+                let current = self.eval(target, facts, &Memo::disabled())?;
+                if let Some(result) = functions::call_method(&current, name, &args) {
                     // A built-in that never changes its receiver
                     return result.map(|_| ()).map_err(EngineError::FunctionError);
                 }

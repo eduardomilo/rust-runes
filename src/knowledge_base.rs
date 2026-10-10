@@ -1,4 +1,4 @@
-use crate::compiled::CompiledRule;
+use crate::compiled::{CompiledRule, Interner, PathIndex};
 use crate::parser::GrlParser;
 use crate::rule::Rule;
 use std::collections::HashMap;
@@ -13,8 +13,12 @@ pub struct KnowledgeBase {
     salience_order: Vec<usize>,
     /// `rules[i]` compiled for execution
     compiled: Vec<CompiledRule>,
+    /// `position_of[i]` is where `rules[i]` sits in `salience_order`
+    position_of: Vec<usize>,
+    /// Shares memo slots between identical sub-expressions across rules
+    interner: Interner,
     /// For each fact name, the rules whose conditions read it
-    readers: HashMap<String, Vec<usize>>,
+    readers: PathIndex,
     /// How many rules have conditions with effects, or that call methods
     /// (which may turn out to be user-registered)
     effectful_conditions: usize,
@@ -36,8 +40,12 @@ impl KnowledgeBase {
             .salience_order
             .partition_point(|&i| self.rules[i].salience >= rule.salience);
         self.salience_order.insert(position, index);
+        self.position_of.push(position);
+        for (p, &i) in self.salience_order.iter().enumerate().skip(position) {
+            self.position_of[i] = p;
+        }
         self.rule_index.insert(rule.name.clone(), index);
-        let compiled = CompiledRule::new(&rule);
+        let compiled = CompiledRule::new(&rule, &mut self.interner);
         self.add_readers(index, &compiled);
         self.compiled.push(compiled);
         self.rules.push(rule);
@@ -103,22 +111,28 @@ impl KnowledgeBase {
         self.salience_order.iter().map(|&i| &self.rules[i])
     }
 
-    /// Iterates rules highest salience first along with their index and compiled form.
-    pub(crate) fn entries_by_salience(
-        &self,
-    ) -> impl Iterator<Item = (usize, &Rule, &CompiledRule)> + '_ {
-        self.salience_order
-            .iter()
-            .map(|&i| (i, &self.rules[i], &self.compiled[i]))
+    /// The rule at `position` in salience order, with its index and compiled form.
+    pub(crate) fn entry_at(&self, position: usize) -> (usize, &Rule, &CompiledRule) {
+        let i = self.salience_order[position];
+        (i, &self.rules[i], &self.compiled[i])
     }
 
-    pub(crate) fn compiled(&self, index: usize) -> &CompiledRule {
-        &self.compiled[index]
+    /// Where the rule with index `index` sits in salience order.
+    pub(crate) fn position_of(&self, index: usize) -> usize {
+        self.position_of[index]
+    }
+
+    pub(crate) fn index_of(&self, name: &str) -> Option<usize> {
+        self.rule_index.get(name).copied()
+    }
+
+    pub(crate) fn interner(&self) -> &Interner {
+        &self.interner
     }
 
     /// Indices of the rules whose conditions read the fact `root`.
-    pub(crate) fn readers_of(&self, root: &str) -> &[usize] {
-        self.readers.get(root).map_or(&[], Vec::as_slice)
+    pub(crate) fn readers(&self) -> &PathIndex {
+        &self.readers
     }
 
     /// Whether every rule's condition can be skipped without observable effects,
@@ -131,11 +145,7 @@ impl KnowledgeBase {
     fn add_readers(&mut self, index: usize, compiled: &CompiledRule) {
         self.effectful_conditions += compiled.has_effects as usize;
         self.conditions_with_methods += !compiled.condition_methods.is_empty() as usize;
-        let mut roots: Vec<&String> = compiled.reads.iter().map(|path| &path[0]).collect();
-        roots.dedup();
-        for root in roots {
-            self.readers.entry(root.clone()).or_default().push(index);
-        }
+        self.readers.add(index, &compiled.reads);
     }
 
     pub fn remove_rule(&mut self, name: &str) -> Option<Rule> {
@@ -156,8 +166,12 @@ impl KnowledgeBase {
                     *i -= 1;
                 }
             }
+            self.position_of = vec![0; self.rules.len()];
+            for (p, &i) in self.salience_order.iter().enumerate() {
+                self.position_of[i] = p;
+            }
             let compiled = std::mem::take(&mut self.compiled);
-            self.readers.clear();
+            self.readers = PathIndex::default();
             self.effectful_conditions = 0;
             self.conditions_with_methods = 0;
             for (i, rule) in compiled.iter().enumerate() {
@@ -176,7 +190,9 @@ impl KnowledgeBase {
         self.rule_index.clear();
         self.salience_order.clear();
         self.compiled.clear();
-        self.readers.clear();
+        self.position_of.clear();
+        self.interner = Interner::default();
+        self.readers = PathIndex::default();
         self.effectful_conditions = 0;
         self.conditions_with_methods = 0;
     }
