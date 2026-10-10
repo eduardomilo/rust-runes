@@ -5,6 +5,7 @@ pub mod engine;
 pub mod facts;
 pub mod functions;
 pub mod knowledge_base;
+mod methods;
 pub mod operators;
 pub mod parser;
 pub mod rule;

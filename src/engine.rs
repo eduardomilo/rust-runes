@@ -1,10 +1,13 @@
 use crate::bitset::BitSet;
 use crate::compiled::{path_from_snippet, CompiledRule, MemoSlot, Node, Path as FactPath};
 use crate::facts::{Fact, FactValue};
-use crate::functions::{self, Function, Method};
+use crate::functions::{self, Function};
 use crate::knowledge_base::KnowledgeBase;
+use crate::methods::MethodRegistry;
 use crate::operators;
 use crate::rule::Rule;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -186,7 +189,7 @@ enum Key {
 pub struct RuleEngine {
     knowledge_base: KnowledgeBase,
     functions: HashMap<String, Box<Function>>,
-    methods: HashMap<String, Box<Method>>,
+    methods: MethodRegistry,
     max_cycles: usize,
     return_err_on_failed_rule_evaluation: bool,
     listeners: Vec<Box<dyn EngineListener>>,
@@ -198,7 +201,7 @@ impl RuleEngine {
         Self {
             knowledge_base: KnowledgeBase::new(),
             functions: HashMap::new(),
-            methods: HashMap::new(),
+            methods: MethodRegistry::default(),
             max_cycles: DEFAULT_MAX_CYCLES,
             return_err_on_failed_rule_evaluation: false,
             listeners: Vec::new(),
@@ -272,11 +275,45 @@ impl RuleEngine {
     where
         F: Fn(&mut FactValue, &[FactValue]) -> Result<FactValue, String> + Send + Sync + 'static,
     {
-        if self.methods.contains_key(name) {
-            return Err(format!("Method '{}' is already registered", name));
-        }
-        self.methods.insert(name.to_string(), Box::new(method));
-        Ok(())
+        self.methods.register(name, Box::new(method))
+    }
+
+    /// Like `register_method`, but the method works on your own type `T`, the
+    /// counterpart of a method on a Go fact struct. Around each call the receiver is
+    /// converted into `T` and back with serde (so `T` is typically the type the fact was
+    /// created from with `Fact::from_serialize`), the arguments are decoded into `A`,
+    /// and the result `R` is converted into a fact value.
+    ///
+    /// `A` is a tuple for fixed arguments (`(f64,)`, `(String, i64)`), `()` for none,
+    /// or a `Vec` for any number. Return `Ok(())` for no result (it becomes `nil`).
+    ///
+    /// The same name can be registered for several types; a call goes to the first
+    /// whose type the receiver converts into, then to an untyped method of that name.
+    /// Fields the receiver has that `T` doesn't are kept.
+    ///
+    /// ```
+    /// # use rust_runes::RuleEngine;
+    /// # #[derive(serde::Serialize, serde::Deserialize)]
+    /// # struct Loan { amount: f64, escrow: f64 }
+    /// let mut engine = RuleEngine::new();
+    /// engine.register_typed_method("CalculateEscrow", |loan: &mut Loan, (): ()| {
+    ///     loan.escrow = loan.amount * 0.01;
+    ///     Ok(())
+    /// })?;
+    /// engine.register_typed_method("Payment", |loan: &mut Loan, (rate,): (f64,)| {
+    ///     Ok(loan.amount * rate / 12.0)
+    /// })?;
+    /// // GRL: then Loan.CalculateEscrow(); Loan.Monthly = Loan.Payment(0.06);
+    /// # Ok::<(), String>(())
+    /// ```
+    pub fn register_typed_method<T, A, R, F>(&mut self, name: &str, method: F) -> Result<(), String>
+    where
+        T: Serialize + DeserializeOwned + 'static,
+        A: DeserializeOwned + 'static,
+        R: Serialize + 'static,
+        F: Fn(&mut T, A) -> Result<R, String> + Send + Sync + 'static,
+    {
+        self.methods.register_typed(name, method)
     }
 
     /// Runs rules until no condition holds, as Grule does. Each cycle evaluates every
@@ -523,7 +560,7 @@ impl RuleEngine {
     }
 
     fn any_user_method(&self, names: &[String]) -> bool {
-        !self.methods.is_empty() && names.iter().any(|name| self.methods.contains_key(name))
+        !self.methods.is_empty() && names.iter().any(|name| self.methods.contains(name))
     }
 
     /// Forgets results that depend on anything under `written`: the conditions that
@@ -799,14 +836,16 @@ impl RuleEngine {
         if let Some(result) = functions::call_method_mut(receiver, name, args) {
             return result.map_err(EngineError::FunctionError);
         }
-        let method = self.methods.get(name).ok_or_else(|| {
-            EngineError::FunctionError(format!(
+        let type_name = receiver.type_name();
+        match self.methods.call(receiver, name, args) {
+            Some(result) => {
+                result.map_err(|e| EngineError::FunctionError(format!("{}(): {}", name, e)))
+            }
+            None => Err(EngineError::FunctionError(format!(
                 "Unknown method '{}' on {}",
-                name,
-                receiver.type_name()
-            ))
-        })?;
-        method(receiver, args).map_err(|e| EngineError::FunctionError(format!("{}(): {}", name, e)))
+                name, type_name
+            ))),
+        }
     }
 
     fn execute_action(

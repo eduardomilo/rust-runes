@@ -42,7 +42,7 @@ When in doubt about semantics, Grule's source is the reference (`antlr/grulev3.g
 
 2. **Operators (`operators.rs`)**: Type rules for every operator, ported from Grule's `reflectmath.go` (integer vs float arithmetic, `/` always float, string concatenation, comparison and equality rules, strict booleans).
 
-3. **Functions (`functions.rs`, `time_functions.rs`)**: All Grule built-in functions and string/array/map methods, user functions (`register_function`) and user methods (`register_method`). `time_functions.rs` implements `MakeTime` (Go-style normalization) and Go reference-time layouts for `TimeFormat`.
+3. **Functions (`functions.rs`, `time_functions.rs`)**: All Grule built-in functions and string/array/map methods, user functions (`register_function`) and user methods (`register_method`, or `register_typed_method` for methods on the caller's serde types; the registry is in `methods.rs`). `time_functions.rs` implements `MakeTime` (Go-style normalization) and Go reference-time layouts for `TimeFormat`.
 
 4. **Knowledge Base (`knowledge_base.rs`)**: Stores rules, keeps them in salience order on insert, and loads them from GRL strings, files and directories.
 

@@ -202,6 +202,26 @@ engine.register_method("Charge", |account, args| {
 })?;
 ```
 
+To call methods on your own types, the counterpart of methods on Go fact structs,
+register them typed. The fact is converted into your type for the call and back
+afterwards, arguments decode into a tuple (or a `Vec` for any number), and the return
+value becomes a fact value:
+
+```rust
+engine.register_typed_method("CalculateEscrow", |loan: &mut Loan, (): ()| {
+    loan.calculate_escrow();
+    Ok(())
+})?;
+engine.register_typed_method("DTIBreakpoint", |loan: &mut Loan, (ratio,): (f64,)| {
+    Ok(loan.dti_breakpoint(ratio))
+})?;
+// GRL: when Fact.DTIBreakpoint(0.5) <= Fact.PropertyValue then Fact.CalculateEscrow();
+```
+
+The same name can be registered for several types; each call goes to the type the
+fact converts into. The conversion costs a serde round trip per call, which is fine
+for occasional calls but not for a method evaluated in thousands of conditions.
+
 Methods correspond to calling methods on Go facts in Grule. A method called as a
 statement in a rule's `then` scope on a fact path (`Order.Items.Append(x);`,
 `Account.Charge(10);`) changes the stored fact; anywhere else it works on a copy.
