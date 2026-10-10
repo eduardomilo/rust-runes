@@ -54,7 +54,7 @@ When in doubt about semantics, Grule's source is the reference (`antlr/grulev3.g
 
 8. **Parser (`parser.rs`, `grl.pest`)**: A pest grammar following `grulev3.g4`, with a Pratt parser for Grule's operator precedence.
 
-Examples live in `examples/` (`cargo run --example quickstart`). The library has `#![warn(missing_docs)]`; document new public items. Minimum Rust version is 1.82 (`rust-version` in Cargo.toml, checked by the `msrv` CI job) - avoid newer std APIs in the library.
+Examples live in `examples/` (`cargo run --example quickstart`). The library has `#![warn(missing_docs)]`; document new public items. Minimum Rust version is 1.83 (`rust-version` in Cargo.toml, checked by the `msrv` CI job) - avoid newer std APIs in the library.
 
 Tests: `tests/grule_parity.rs` covers Grule-documented behavior; `tests/engine_features.rs` covers engine features end to end. Benchmarks in `benches/grule_comparison.rs` mirror Grule's.
 

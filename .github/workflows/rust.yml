@@ -39,6 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       # Keep in sync with `rust-version` in Cargo.toml. Only the library is built:
-      # dev-dependencies (criterion) need a newer toolchain.
-      - uses: dtolnay/rust-toolchain@1.82
+      # dev-dependencies (criterion) need a newer toolchain. The version is an input
+      # rather than the action's ref so Dependabot doesn't "update" it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.83"
       - run: cargo build --lib --locked
