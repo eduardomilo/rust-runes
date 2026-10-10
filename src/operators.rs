@@ -172,6 +172,31 @@ pub fn boolean(value: &FactValue, operation: &str) -> Result<bool, EngineError> 
         .ok_or_else(|| type_error(operation, value))
 }
 
+/// Converts a value being assigned to a field or element that already holds `current`,
+/// following Grule's `SetAttributeValue`: numbers convert to the existing numeric type
+/// (a float assigned to an integer is truncated), and other types must match.
+/// `nil` may be assigned anywhere, and a `nil` slot accepts anything.
+pub fn coerce_assignment(current: &FactValue, value: FactValue) -> Result<FactValue, String> {
+    use FactValue::*;
+    match (current, value) {
+        (Null, value) | (_, value @ Null) => Ok(value),
+        (Integer(_), Integer(n)) => Ok(Integer(n)),
+        (Integer(_), Float(f)) => Ok(Integer(f as i64)),
+        (Float(_), Integer(n)) => Ok(Float(n as f64)),
+        (Float(_), Float(f)) => Ok(Float(f)),
+        (String(_), value @ String(_))
+        | (Boolean(_), value @ Boolean(_))
+        | (Time(_), value @ Time(_))
+        | (Object(_), value @ Object(_))
+        | (Array(_), value @ Array(_)) => Ok(value),
+        (current, value) => Err(format!(
+            "can not assign type {} to {}",
+            value.type_name(),
+            current.type_name()
+        )),
+    }
+}
+
 /// Formats a value like Go's `%v`, for `Log` and `LogFormat`.
 pub(crate) fn to_text(value: &FactValue) -> String {
     match value {

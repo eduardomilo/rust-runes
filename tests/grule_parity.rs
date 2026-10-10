@@ -595,3 +595,206 @@ fn engine_can_be_shared_across_threads() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<RuleEngine>();
 }
+
+// --- Assignment keeps field types (reflectools.go SetAttributeValue) ---
+
+#[test]
+fn assignment_converts_numbers_to_the_field_type() {
+    let grl = r#"
+        rule R {
+            when true
+            then
+                Fact.Count = 7 / 2;
+                Fact.Ratio = 3;
+                Fact.Items[0] = 2.9;
+                Fact.Missing = nil;
+                Fact.New = "anything";
+                Free = 1;
+                Free = "now a string";
+                Retract("R");
+        }
+    "#;
+    let mut f = facts(json!({ "Fact": { "Count": 10, "Ratio": 0.5, "Items": [1], "Missing": 5 } }));
+    strict_engine(grl).execute(&mut f).unwrap();
+    let field = |name: &str| f["Fact"].get_field(name).cloned().unwrap();
+    // Truncated toward zero, like Go's int64(float)
+    assert!(matches!(field("Count"), FactValue::Integer(3)));
+    assert!(matches!(field("Ratio"), FactValue::Float(r) if r == 3.0));
+    assert_eq!(
+        field("Items"),
+        FactValue::from_serialize(&json!([2])).unwrap()
+    );
+    assert_eq!(field("Missing"), FactValue::Null);
+    assert_eq!(field("New"), FactValue::from("anything"));
+    // Top-level variables are not typed
+    assert_eq!(f["Free"].value, FactValue::from("now a string"));
+}
+
+#[test]
+fn assigning_a_different_type_to_a_field_is_an_error() {
+    let mut engine = RuleEngine::new();
+    engine
+        .add_rules_from_str(r#"rule R { when true then Fact.Name = 42; }"#)
+        .unwrap();
+    let err = engine
+        .execute(&mut facts(json!({ "Fact": { "Name": "x" } })))
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Fact.Name: can not assign type integer to string"),
+        "{}",
+        err
+    );
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct Counter {
+    count: i64,
+}
+
+#[test]
+fn integer_fields_survive_division() {
+    let mut f = HashMap::from([(
+        "C".to_string(),
+        Fact::from_serialize("C", &Counter { count: 9 }).unwrap(),
+    )]);
+    strict_engine(r#"rule Halve { when C.count > 1 then C.count = C.count / 2; }"#)
+        .execute(&mut f)
+        .unwrap();
+    assert_eq!(
+        f["C"].deserialize::<Counter>().unwrap(),
+        Counter { count: 1 }
+    );
+}
+
+// --- Time fields from Rust types ---
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct Order {
+    #[serde(with = "rust_runes::serde_time")]
+    created: chrono::DateTime<chrono::Utc>,
+    #[serde(with = "rust_runes::serde_time::option")]
+    shipped: Option<chrono::DateTime<chrono::Utc>>,
+    // Not annotated: stays a string
+    note: String,
+}
+
+#[test]
+fn annotated_time_fields_become_times() {
+    use chrono::TimeZone;
+    let created = chrono::Utc.with_ymd_and_hms(2023, 5, 6, 7, 8, 9).unwrap();
+    let order = Order {
+        created,
+        shipped: None,
+        note: "2023-05-06T07:08:09Z".to_string(),
+    };
+
+    // Ordinary serialization is unaffected
+    let json = serde_json::to_string(&order).unwrap();
+    assert!(
+        json.contains(r#""created":"2023-05-06T07:08:09Z""#),
+        "{}",
+        json
+    );
+
+    let grl = r#"
+        rule Ship {
+            when
+                GetTimeYear(Order.created) == 2023 && IsTimeBefore(Order.created, Now())
+                && IsNil(Order.shipped) && Order.note == "2023-05-06T07:08:09Z"
+            then
+                Order.shipped = MakeTime(2023, 5, 8, 0, 0, 0);
+        }
+    "#;
+    let mut f = HashMap::from([(
+        "Order".to_string(),
+        Fact::from_serialize("Order", &order).unwrap(),
+    )]);
+    assert!(matches!(
+        f["Order"].get_field("created"),
+        Some(FactValue::Time(_))
+    ));
+    assert!(matches!(
+        f["Order"].get_field("note"),
+        Some(FactValue::String(_))
+    ));
+
+    strict_engine(grl).execute(&mut f).unwrap();
+    let order: Order = f["Order"].deserialize().unwrap();
+    assert_eq!(order.created, created);
+    let shipped = order.shipped.expect("shipped is set");
+    assert_eq!(
+        shipped,
+        chrono::Local
+            .with_ymd_and_hms(2023, 5, 8, 0, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    );
+}
+
+// --- Maps with integer keys ---
+
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct Codes {
+    names: HashMap<i32, String>,
+}
+
+#[test]
+fn maps_with_integer_keys() {
+    let codes = Codes {
+        names: HashMap::from([(404, "Not Found".to_string())]),
+    };
+    let grl = r#"
+        rule R {
+            when Codes.names[404] == "Not Found" && Codes.names.Len() == 1
+            then Codes.names[500] = "Server Error"; Codes.names[404] = "Missing";
+        }
+    "#;
+    let mut f = HashMap::from([(
+        "Codes".to_string(),
+        Fact::from_serialize("Codes", &codes).unwrap(),
+    )]);
+    strict_engine(grl).execute(&mut f).unwrap();
+    let codes: Codes = f["Codes"].deserialize().unwrap();
+    assert_eq!(
+        codes.names,
+        HashMap::from([
+            (404, "Missing".to_string()),
+            (500, "Server Error".to_string())
+        ])
+    );
+}
+
+// --- String escapes (Go's strconv.UnquoteChar) ---
+
+#[test]
+fn go_string_escapes() {
+    assert_eq!(
+        eval(r#""\x41\101é\U0001F600\a\v\f\b""#),
+        FactValue::from("AAé😀\u{7}\u{b}\u{c}\u{8}")
+    );
+    assert_eq!(eval(r#"'\'' + "\"""#), FactValue::from("'\""));
+    let parse = |grl: &str| rust_runes::parser::GrlParser::new().parse_rule(grl);
+    assert!(parse(r#"rule R { when "\xZZ" == "" then }"#).is_err());
+    assert!(parse(r#"rule R { when "\400" == "" then }"#).is_err());
+    // A lone high byte is not valid UTF-8
+    assert!(parse(r#"rule R { when "\xff" == "" then }"#)
+        .unwrap_err()
+        .contains("UTF-8"));
+}
+
+// --- Timeouts (Go context deadlines) ---
+
+#[test]
+fn execution_times_out() {
+    let mut engine = strict_engine("rule Forever { when true then n += 1; }");
+    engine.set_max_cycles(usize::MAX);
+    let mut f = facts(json!({ "n": 0 }));
+    let started = std::time::Instant::now();
+    let err = engine
+        .execute_with_timeout(&mut f, std::time::Duration::from_millis(20))
+        .unwrap_err();
+    assert!(matches!(err, EngineError::TimedOut), "{}", err);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(f["n"].value.as_integer().unwrap() > 0);
+}

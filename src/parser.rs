@@ -244,32 +244,65 @@ fn parse_string(pair: Pair<GrammarRule>) -> std::result::Result<String, String> 
     } else {
         '\''
     };
-    let raw = inner.as_str();
-    let mut out = String::with_capacity(raw.len());
+    unescape(inner.as_str(), quote)
+}
+
+/// Decodes escapes as Go's `strconv.UnquoteChar` does (which Grule uses): `\a \b \f \n
+/// \r \t \v \\ \' \"`, `\xNN` and three-digit octal `\NNN` (raw bytes), and `\uNNNN` /
+/// `\UNNNNNNNN` (Unicode code points). A doubled quote also stands for one quote.
+fn unescape(raw: &str, quote: char) -> std::result::Result<String, String> {
+    let mut out: Vec<u8> = Vec::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
+    let digits = |chars: &mut std::iter::Peekable<std::str::Chars>, count: usize, radix: u32| {
+        let text: String = chars.by_ref().take(count).collect();
+        if text.len() != count {
+            return Err(format!("Incomplete escape sequence: {}", text));
+        }
+        u32::from_str_radix(&text, radix).map_err(|_| format!("Invalid escape sequence: {}", text))
+    };
     while let Some(c) = chars.next() {
         if c == quote {
             // A doubled quote stands for one quote character
             chars.next();
-            out.push(quote);
+            out.push(quote as u8);
             continue;
         }
         if c != '\\' {
-            out.push(c);
+            out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
-            Some('\\') => out.push('\\'),
-            Some(other) => return Err(format!("Invalid escape sequence: \\{}", other)),
-            None => return Err("Unterminated escape sequence".to_string()),
-        }
+        let Some(escape) = chars.next() else {
+            return Err("Unterminated escape sequence".to_string());
+        };
+        let byte = match escape {
+            'a' => 0x07,
+            'b' => 0x08,
+            'f' => 0x0c,
+            'n' => b'\n',
+            'r' => b'\r',
+            't' => b'\t',
+            'v' => 0x0b,
+            '\\' => b'\\',
+            '\'' => b'\'',
+            '"' => b'"',
+            'x' => digits(&mut chars, 2, 16)? as u8,
+            '0'..='7' => {
+                let rest = digits(&mut chars, 2, 8)?;
+                let value = escape.to_digit(8).unwrap() * 64 + rest;
+                u8::try_from(value).map_err(|_| format!("Octal escape out of range: {}", value))?
+            }
+            'u' | 'U' => {
+                let code = digits(&mut chars, if escape == 'u' { 4 } else { 8 }, 16)?;
+                let c = char::from_u32(code)
+                    .ok_or_else(|| format!("Invalid Unicode code point: {:X}", code))?;
+                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                continue;
+            }
+            other => return Err(format!("Invalid escape sequence: \\{}", other)),
+        };
+        out.push(byte);
     }
-    Ok(out)
+    String::from_utf8(out).map_err(|_| "String literal is not valid UTF-8".to_string())
 }
 
 /// Parses a decimal, hexadecimal (`0x1F`) or octal (`017`) integer literal,

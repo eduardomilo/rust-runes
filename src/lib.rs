@@ -11,7 +11,7 @@ pub mod rule;
 pub mod time_functions;
 
 pub use engine::{EngineError, EngineListener, ExecutionResult, RuleEngine, RulePhase};
-pub use facts::{Fact, FactValue};
+pub use facts::{serde_time, Fact, FactValue};
 pub use knowledge_base::KnowledgeBase;
 pub use rule::Rule;
 

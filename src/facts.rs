@@ -119,6 +119,7 @@ impl FactValue {
     /// Structs and maps become objects, sequences become arrays, and integers that
     /// fit in an `i64` become integers. Time types serialize as strings.
     pub fn from_serialize<T: Serialize + ?Sized>(value: &T) -> Result<FactValue, String> {
+        let _converting = serde_time::ConvertingGuard::enter();
         serde_json::to_value(value)
             .map(from_json)
             .map_err(|e| format!("Cannot convert to a fact: {}", e))
@@ -140,7 +141,10 @@ fn from_json(value: serde_json::Value) -> FactValue {
             Some(i) => FactValue::Integer(i),
             None => FactValue::Float(n.as_f64().unwrap_or(f64::NAN)),
         },
-        Value::String(s) => FactValue::String(s),
+        Value::String(s) => match serde_time::parse_marked(&s) {
+            Some(time) => FactValue::Time(time),
+            None => FactValue::String(s),
+        },
         Value::Array(items) => FactValue::Array(items.into_iter().map(from_json).collect()),
         Value::Object(obj) => {
             FactValue::Object(obj.into_iter().map(|(k, v)| (k, from_json(v))).collect())
@@ -269,5 +273,106 @@ impl Fact {
 
     pub fn boolean_fact(name: String, value: bool) -> Self {
         Self::new(name, FactValue::Boolean(value))
+    }
+}
+
+/// Serde support for time fields in fact structs. Annotate `DateTime` fields with
+/// `#[serde(with = "rust_runes::serde_time")]` (or `serde_time::option` for
+/// `Option<DateTime<_>>`) and `Fact::from_serialize` turns them into time values
+/// that rules can compare and pass to the time functions. Without it, chrono
+/// serializes times as strings, and they reach rules as strings.
+///
+/// Outside fact conversion the fields serialize as ordinary RFC 3339 strings, so the
+/// annotation doesn't change your other serialization.
+pub mod serde_time {
+    use chrono::{DateTime, FixedOffset, SecondsFormat, TimeZone};
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::cell::Cell;
+
+    /// Prefix that tells fact conversion a string is a time. It only appears while
+    /// `FactValue::from_serialize` is running.
+    const MARKER: &str = "\u{1}rust-runes:time\u{1}";
+
+    thread_local! {
+        static CONVERTING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Marks the current thread as converting values into facts, until dropped.
+    pub(crate) struct ConvertingGuard(bool);
+
+    impl ConvertingGuard {
+        pub(crate) fn enter() -> Self {
+            ConvertingGuard(CONVERTING.replace(true))
+        }
+    }
+
+    impl Drop for ConvertingGuard {
+        fn drop(&mut self) {
+            CONVERTING.set(self.0);
+        }
+    }
+
+    pub(crate) fn parse_marked(text: &str) -> Option<DateTime<FixedOffset>> {
+        DateTime::parse_from_rfc3339(text.strip_prefix(MARKER)?).ok()
+    }
+
+    pub fn serialize<Tz: TimeZone, S: Serializer>(
+        time: &DateTime<Tz>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let text = time
+            .fixed_offset()
+            .to_rfc3339_opts(SecondsFormat::AutoSi, true);
+        if CONVERTING.get() {
+            serializer.serialize_str(&format!("{}{}", MARKER, text))
+        } else {
+            serializer.serialize_str(&text)
+        }
+    }
+
+    pub fn deserialize<'de, Tz, D>(deserializer: D) -> Result<DateTime<Tz>, D::Error>
+    where
+        Tz: TimeZone,
+        DateTime<Tz>: From<DateTime<FixedOffset>>,
+        D: Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        let text = text.strip_prefix(MARKER).unwrap_or(&text);
+        DateTime::parse_from_rfc3339(text)
+            .map(Into::into)
+            .map_err(D::Error::custom)
+    }
+
+    /// For `Option<DateTime<_>>` fields: `#[serde(with = "rust_runes::serde_time::option")]`.
+    pub mod option {
+        use super::*;
+
+        pub fn serialize<Tz: TimeZone, S: Serializer>(
+            time: &Option<DateTime<Tz>>,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
+            match time {
+                Some(time) => super::serialize(time, serializer),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        pub fn deserialize<'de, Tz, D>(deserializer: D) -> Result<Option<DateTime<Tz>>, D::Error>
+        where
+            Tz: TimeZone,
+            DateTime<Tz>: From<DateTime<FixedOffset>>,
+            D: Deserializer<'de>,
+        {
+            match Option::<String>::deserialize(deserializer)? {
+                Some(text) => {
+                    let text = text.strip_prefix(MARKER).unwrap_or(&text);
+                    DateTime::parse_from_rfc3339(text)
+                        .map(|t| Some(t.into()))
+                        .map_err(D::Error::custom)
+                }
+                None => Ok(None),
+            }
+        }
     }
 }

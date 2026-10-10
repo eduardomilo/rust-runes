@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt::{self, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// Maximum number of rule firings per execution, matching Grule's default.
@@ -36,6 +37,8 @@ pub enum EngineError {
     MaxCyclesExceeded(usize),
     #[error("Execution was cancelled")]
     Cancelled,
+    #[error("Execution timed out")]
+    TimedOut,
     /// An error raised while evaluating or executing a specific rule.
     #[error("Rule '{rule}' failed in its {phase} scope: {source}")]
     InRule {
@@ -294,17 +297,44 @@ impl RuleEngine {
         &self,
         facts: &mut HashMap<String, Fact>,
     ) -> Result<ExecutionResult, EngineError> {
-        self.execute_with_cancel(facts, &AtomicBool::new(false))
+        self.run(facts, &Cancellation::default())
     }
 
     /// Like `execute`, but stops with `EngineError::Cancelled` once `cancel` is set,
-    /// checked before each rule evaluation. Set it from another thread, e.g. on a timeout.
+    /// checked before each rule evaluation. Set it from another thread.
     pub fn execute_with_cancel(
         &self,
         facts: &mut HashMap<String, Fact>,
         cancel: &AtomicBool,
     ) -> Result<ExecutionResult, EngineError> {
-        let start_time = std::time::Instant::now();
+        let cancellation = Cancellation {
+            flag: Some(cancel),
+            deadline: None,
+        };
+        self.run(facts, &cancellation)
+    }
+
+    /// Like `execute`, but stops with `EngineError::TimedOut` once `timeout` has
+    /// elapsed, checked before each rule evaluation (like a Go context deadline).
+    /// A single slow function call can still overrun it.
+    pub fn execute_with_timeout(
+        &self,
+        facts: &mut HashMap<String, Fact>,
+        timeout: Duration,
+    ) -> Result<ExecutionResult, EngineError> {
+        let cancellation = Cancellation {
+            flag: None,
+            deadline: Some(Instant::now() + timeout),
+        };
+        self.run(facts, &cancellation)
+    }
+
+    fn run(
+        &self,
+        facts: &mut HashMap<String, Fact>,
+        cancel: &Cancellation,
+    ) -> Result<ExecutionResult, EngineError> {
+        let start_time = Instant::now();
         let mut result = ExecutionResult::new();
         let mut state = ExecutionState::default();
         let kb = &self.knowledge_base;
@@ -342,7 +372,7 @@ impl RuleEngine {
 
         let mut cycle: u64 = 0;
         loop {
-            check_cancel(cancel)?;
+            cancel.check()?;
             self.listeners.iter().for_each(|l| l.begin_cycle(cycle + 1));
 
             let selected = if full_evaluation {
@@ -394,11 +424,11 @@ impl RuleEngine {
         agenda: &mut Agenda,
         facts: &HashMap<String, Fact>,
         memo: &Memo,
-        cancel: &AtomicBool,
+        cancel: &Cancellation,
     ) -> Result<Option<usize>, EngineError> {
         let mut selected = None;
         for position in 0..self.knowledge_base.len() {
-            check_cancel(cancel)?;
+            cancel.check()?;
             if agenda.retracted.contains(position) {
                 continue;
             }
@@ -427,7 +457,7 @@ impl RuleEngine {
         always: &[usize],
         facts: &HashMap<String, Fact>,
         memo: &Memo,
-        cancel: &AtomicBool,
+        cancel: &Cancellation,
     ) -> Result<Option<usize>, EngineError> {
         let mut best = agenda.matching.next_from(0);
 
@@ -435,7 +465,7 @@ impl RuleEngine {
             if agenda.retracted.contains(position) {
                 continue;
             }
-            check_cancel(cancel)?;
+            cancel.check()?;
             let (_, rule, compiled) = self.knowledge_base.entry_at(position);
             if self.test_rule(rule, compiled, facts, memo)? && best.is_none_or(|b| position < b) {
                 best = Some(position);
@@ -448,7 +478,7 @@ impl RuleEngine {
                 break;
             }
             cursor = position + 1;
-            check_cancel(cancel)?;
+            cancel.check()?;
             let (_, rule, compiled) = self.knowledge_base.entry_at(position);
             if self.evaluate_into(position, rule, compiled, agenda, facts, memo)? {
                 best = Some(position);
@@ -633,6 +663,16 @@ impl RuleEngine {
                         }
                         (FactValue::Object(obj), FactValue::String(key)) => {
                             obj.get(key).ok_or_else(|| {
+                                EngineError::EvaluationError(format!("Key '{}' not found", key))
+                            })
+                        }
+                        // Maps with integer or boolean keys store them as strings
+                        (
+                            FactValue::Object(obj),
+                            key @ (FactValue::Integer(_) | FactValue::Boolean(_)),
+                        ) => {
+                            let key = operators::to_text(key);
+                            obj.get(&key).ok_or_else(|| {
                                 EngineError::EvaluationError(format!("Key '{}' not found", key))
                             })
                         }
@@ -865,14 +905,23 @@ impl RuleEngine {
             return Ok(());
         };
 
+        // Existing fields and elements keep their type, as Go struct fields do
+        let slot = |current: Option<&FactValue>, value| match current {
+            Some(current) => operators::coerce_assignment(current, value).map_err(|e| {
+                EngineError::TypeError(format!("{}: {}", describe_path(&root, &keys), e))
+            }),
+            None => Ok(value),
+        };
         match (walk_mut(facts, &root, &keys, parent_keys.len())?, last) {
-            (FactValue::Object(obj), Key::Field(field)) => {
-                obj.insert(field.clone(), value);
+            (FactValue::Object(obj), key @ (Key::Field(_) | Key::Index(_))) => {
+                let field = object_key(key);
+                let value = slot(obj.get(&field), value)?;
+                obj.insert(field, value);
                 Ok(())
             }
             (FactValue::Array(items), Key::Index(n)) => {
                 let i = array_index(*n, items.len())?;
-                items[i] = value;
+                items[i] = slot(Some(&items[i]), value)?;
                 Ok(())
             }
             (other, key) => Err(key_mismatch(other, key, &describe_path(&root, parent_keys))),
@@ -909,6 +958,7 @@ impl RuleEngine {
                 keys.push(match self.evaluate_expression(index, facts)? {
                     FactValue::Integer(n) => Key::Index(n),
                     FactValue::String(s) => Key::Field(s),
+                    FactValue::Boolean(b) => Key::Field(b.to_string()),
                     other => {
                         return Err(EngineError::TypeError(format!(
                             "Cannot index with {}",
@@ -935,10 +985,27 @@ impl Default for RuleEngine {
     }
 }
 
-fn check_cancel(cancel: &AtomicBool) -> Result<(), EngineError> {
-    if cancel.load(AtomicOrdering::Relaxed) {
-        Err(EngineError::Cancelled)
-    } else {
+/// When to stop an execution early: a flag set by the caller, a deadline, or both.
+#[derive(Default)]
+struct Cancellation<'a> {
+    flag: Option<&'a AtomicBool>,
+    deadline: Option<Instant>,
+}
+
+impl Cancellation<'_> {
+    fn check(&self) -> Result<(), EngineError> {
+        if self
+            .flag
+            .is_some_and(|flag| flag.load(AtomicOrdering::Relaxed))
+        {
+            return Err(EngineError::Cancelled);
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(EngineError::TimedOut);
+        }
         Ok(())
     }
 }
@@ -957,12 +1024,14 @@ fn walk_mut<'f>(
     let mut current = &mut fact.value;
     for (step, key) in keys[..depth].iter().enumerate() {
         current = match (current, key) {
-            (FactValue::Object(obj), Key::Field(field)) => obj.get_mut(field).ok_or_else(|| {
-                EngineError::EvaluationError(format!(
-                    "Field '{}' not found",
-                    describe_path(root, &keys[..=step])
-                ))
-            })?,
+            (FactValue::Object(obj), key @ (Key::Field(_) | Key::Index(_))) => {
+                obj.get_mut(&object_key(key)).ok_or_else(|| {
+                    EngineError::EvaluationError(format!(
+                        "Field '{}' not found",
+                        describe_path(root, &keys[..=step])
+                    ))
+                })?
+            }
             (FactValue::Array(items), Key::Index(n)) => {
                 let i = array_index(*n, items.len())?;
                 &mut items[i]
@@ -988,6 +1057,15 @@ fn project<'f>(
     match value {
         Cow::Borrowed(value) => part(value).map(Cow::Borrowed),
         Cow::Owned(value) => part(&value).map(|p| Cow::Owned(p.clone())),
+    }
+}
+
+/// The key an object is accessed with: fields by name, and numeric indexes by their
+/// decimal form, which is how serde stores maps with integer keys.
+fn object_key(key: &Key) -> String {
+    match key {
+        Key::Field(field) => field.clone(),
+        Key::Index(n) => n.to_string(),
     }
 }
 
