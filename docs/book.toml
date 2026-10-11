@@ -1,0 +1,13 @@
+[book]
+title = "rust-runes"
+description = "A Grule-compatible rule engine for Rust"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/eduardomilo/rust-runes"
+edit-url-template = "https://github.com/eduardomilo/rust-runes/edit/main/docs/{path}"
+
+# Examples use the rust-runes crate, which the Rust playground doesn't have.
+# They're tested as doc tests instead (see `src/lib.rs`).
+[output.html.playground]
+runnable = false

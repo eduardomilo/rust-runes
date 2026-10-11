@@ -27,8 +27,9 @@ pub fn is_reserved(name: &str) -> bool {
 
 pub(crate) fn builtin(name: &str) -> Option<Builtin> {
     Some(match name {
-        // Working-memory hints. This engine has no working memory to reset, so they
-        // are accepted for compatibility and do nothing.
+        // Working-memory hints. As statements, the engine also invalidates cached
+        // conditions reading the path (see `execute_action`); here they only check
+        // their argument.
         "Changed" | "Forget" => |name, args| {
             string(name, args, 0, 1)?;
             Ok(FactValue::Null)

@@ -6,6 +6,7 @@ rust-version = "1.83"
 description = "A rule engine compatible with Grule's rule language (GRL) and execution model"
 license = "MIT"
 repository = "https://github.com/eduardomilo/rust-runes"
+homepage = "https://eduardomilo.github.io/rust-runes/"
 readme = "README.md"
 keywords = ["rules", "rule-engine", "grule", "grl", "business-rules"]
 exclude = [".github/", "AGENTS.md", "CLAUDE.md"]

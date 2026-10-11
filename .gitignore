@@ -12,3 +12,6 @@ target/
 # Editor and OS files
 .vscode/
 .DS_Store
+
+# Built guide (mdbook build docs)
+docs/book/
