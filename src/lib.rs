@@ -36,8 +36,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! See the README for the rule language, built-in functions, and how this differs
-//! from Grule.
+//! See the [guide](https://eduardomilo.github.io/rust-runes/) for the rule language,
+//! built-in functions, execution model, and how this differs from Grule.
 
 #![warn(missing_docs)]
 
@@ -64,6 +64,32 @@ pub use engine::{EngineError, EngineListener, ExecutionResult, RuleEngine, RuleP
 pub use facts::{serde_time, Fact, FactValue};
 pub use knowledge_base::KnowledgeBase;
 pub use rule::Rule;
+
+// Runs the Rust examples in the README and the guide (`docs/`) as doc tests.
+// `tests/docs_grl.rs` checks their GRL examples.
+#[cfg(doctest)]
+mod guide {
+    #[doc = include_str!("../README.md")]
+    struct Readme;
+    #[doc = include_str!("../docs/src/introduction.md")]
+    struct Introduction;
+    #[doc = include_str!("../docs/src/getting-started.md")]
+    struct GettingStarted;
+    #[doc = include_str!("../docs/src/facts.md")]
+    struct Facts;
+    #[doc = include_str!("../docs/src/language.md")]
+    struct Language;
+    #[doc = include_str!("../docs/src/functions.md")]
+    struct Functions;
+    #[doc = include_str!("../docs/src/execution.md")]
+    struct Execution;
+    #[doc = include_str!("../docs/src/extending.md")]
+    struct Extending;
+    #[doc = include_str!("../docs/src/migrating.md")]
+    struct Migrating;
+    #[doc = include_str!("../docs/src/performance.md")]
+    struct Performance;
+}
 
 #[cfg(test)]
 mod tests {

@@ -19,10 +19,13 @@ cargo fmt --all
 cargo clippy --all-targets -- -D warnings     # what CI runs
 cargo bench                                   # criterion benchmarks
 cargo run --example quickstart                # examples/: quickstart, methods, speed_up
+mdbook serve docs                             # preview the guide
 ```
 
 CI (`.github/workflows/rust.yml`) runs tests, `fmt --check`, clippy with `-D warnings`
-on the latest stable Rust, and builds the library on the minimum Rust version. New
+on the latest stable Rust, and builds the library on the minimum Rust version.
+`.github/workflows/docs.yml` builds the guide and API docs, and deploys them to GitHub
+Pages from `main`. New
 stable releases can add clippy lints, so CI may fail without code changes.
 
 ## Workflow
@@ -36,6 +39,12 @@ stable releases can add clippy lints, so CI may fail without code changes.
   workflow, pass the toolchain as an input (`toolchain: "1.83"`), not as the action ref,
   or Dependabot will "update" it.
 - The library has `#![warn(missing_docs)]`: document new public items.
+- User documentation is the mdBook guide in `docs/src/` (published at
+  https://eduardomilo.github.io/rust-runes/); the README is a short overview that links
+  to it. Update the guide with user-visible changes. Its Rust code blocks run as doc
+  tests through the `guide` module in `src/lib.rs` (add new chapters there; hide setup
+  lines with `# `), and `grl` blocks must parse. Every code block needs a language
+  tag (`rust`, `grl`, `toml`, `text`).
 - `EngineError` and `Expression` are `#[non_exhaustive]`; prefer adding variants over
   changing existing ones.
 
@@ -72,5 +81,7 @@ When in doubt about semantics, Grule's source is the reference (`antlr/grulev3.g
 - `tests/optimization_equivalence.rs`: random rule sets must give identical outcomes
   with caching, sharing and skipping on and off. Run it after touching `engine.rs`,
   `compiled.rs` or `knowledge_base.rs`.
-- `benches/grule_comparison.rs`: mirrors Grule's benchmarks; the README's results table
-  comes from it.
+- `tests/docs_grl.rs`: GRL examples in the README and guide parse, and chapters with
+  Rust examples are wired into the doc tests.
+- `benches/grule_comparison.rs`: mirrors Grule's benchmarks; the results tables in the
+  README and `docs/src/performance.md` come from it.

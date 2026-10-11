@@ -6,5 +6,5 @@
 
 - [ ] Tests added or updated
 - [ ] `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
-- [ ] Public items are documented, and the README is updated if behavior changed
-- [ ] Differences from Grule are intentional, and listed in the README if so
+- [ ] Public items are documented, and the guide (`docs/`) is updated if behavior changed
+- [ ] Differences from Grule are intentional, and listed in `docs/src/migrating.md` if so

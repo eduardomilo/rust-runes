@@ -9,7 +9,8 @@ Open an issue with the GRL rules and facts that reproduce the problem, what you
 expected, and what happened. If the rules behave differently than in
 [Grule](https://github.com/hyperjumptech/grule-rule-engine), say which Grule version you
 compared against: matching Grule's behavior is a goal of this project, and differences
-are bugs unless they're listed under "Differences from Grule" in the README.
+are bugs unless they're listed under "Differences" in the guide's
+[Migrating from Grule](docs/src/migrating.md) chapter.
 
 Please report security vulnerabilities privately; see [SECURITY.md](SECURITY.md).
 
@@ -42,6 +43,11 @@ Please report security vulnerabilities privately; see [SECURITY.md](SECURITY.md)
 - **Minimum Rust version is 1.83** (`rust-version` in `Cargo.toml`); avoid newer standard
   library APIs in the library. CI checks this.
 - **Performance changes** should come with `cargo bench` numbers (before and after).
+- **Documentation** is the guide in `docs/` (an [mdBook](https://rust-lang.github.io/mdBook/),
+  published to GitHub Pages from `main`) and the API docs. Update the guide with
+  user-visible changes. Its examples are tested: Rust blocks run as doc tests and
+  `grl` blocks must parse (`tests/docs_grl.rs`), so tag every code block with its
+  language. Preview it with `mdbook serve docs`.
 
 ## License
 
