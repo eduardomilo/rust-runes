@@ -1,6 +1,8 @@
 # Rust-Runes: A Rule Engine in Rust
 
 [![Rust](https://github.com/eduardomilo/rust-runes/actions/workflows/rust.yml/badge.svg)](https://github.com/eduardomilo/rust-runes/actions/workflows/rust.yml)
+[![crates.io](https://img.shields.io/crates/v/rust-runes.svg)](https://crates.io/crates/rust-runes)
+[![docs.rs](https://img.shields.io/docsrs/rust-runes)](https://docs.rs/rust-runes)
 [![Guide](https://img.shields.io/badge/docs-guide-blue)](https://eduardomilo.github.io/rust-runes/)
 
 A rule engine for embedding business logic in Rust applications, compatible with
